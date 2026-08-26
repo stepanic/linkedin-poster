@@ -1,0 +1,11 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+# In production these go in with `wrangler secret put <NAME>`.
+LINKEDIN_CLIENT_ID=
+LINKEDIN_CLIENT_SECRET=
+# Bearer token for POST /post and /mcp. Generate: openssl rand -hex 32
+API_TOKEN=
+# Guards GET /auth/start so nobody else can bind their LinkedIn account to
+# your Worker. Generate: openssl rand -hex 32
+SETUP_KEY=
+# Optional. Any URL that accepts a JSON POST — used for the renewal reminder.
+NOTIFY_WEBHOOK=

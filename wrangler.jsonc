@@ -1,0 +1,55 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "linkedin-poster",
+  "main": "src/index.ts",
+  // Newest date the pinned workerd runtime accepts (workerd 1.20260825.1).
+  // Bump it together with the wrangler dependency, not ahead of it — a date
+  // the local runtime does not know about fails `wrangler dev` outright.
+  "compatibility_date": "2026-08-25",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Pinned deliberately. `wrangler whoami` lists several accounts and most of
+  // them belong to clients — an explicit id makes a wrong-account deploy
+  // impossible rather than merely unlikely.
+  "account_id": "7dc7167b7e2e00923bfa7cd697df14e4",
+
+  "workers_dev": true,
+
+  // Custom domain. Whatever you put here must match REDIRECT_URI below and the
+  // Redirect URL configured on the LinkedIn app, character for character.
+  "routes": [
+    { "pattern": "li.domovina.ai", "custom_domain": true }
+  ],
+
+  "vars": {
+    // LinkedIn requires a versioned API header in YYYYMM form. Versions are
+    // sunset roughly a year after release (202508 went dark on 2026-08-17), so
+    // this is a maintenance item, not a set-and-forget value.
+    "LINKEDIN_VERSION": "202608",
+    "REDIRECT_URI": "https://li.domovina.ai/auth/callback",
+    // Warn this many days before the 60-day access token expires.
+    "RENEW_WARNING_DAYS": "14"
+  },
+
+  // Created with:
+  //   npx wrangler kv namespace create TOKENS
+  //   npx wrangler kv namespace create TOKENS --preview
+  "kv_namespaces": [
+    {
+      "binding": "TOKENS",
+      "id": "REPLACE_WITH_YOUR_KV_ID",
+      "preview_id": "REPLACE_WITH_YOUR_PREVIEW_KV_ID"
+    }
+  ],
+
+  // Daily at 09:00 UTC — checks how long the token has left and pings you
+  // while silent renewal is still possible.
+  "triggers": {
+    "crons": ["0 9 * * *"]
+  },
+
+  "observability": {
+    "enabled": true,
+    "logs": { "head_sampling_rate": 1 }
+  }
+}
