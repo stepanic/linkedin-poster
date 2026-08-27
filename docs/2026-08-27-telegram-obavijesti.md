@@ -54,11 +54,58 @@ npm run test:telegram
 bota iz grupe. Nema test frameworka: Node skida tipove, a `src/telegram.ts`
 nema nijedan import, pa se učitava takav kakav jest.
 
-**Zapažanje iz ovog postavljanja:** grupa stvorena 2026-08-27 kroz Telegram
-klijent **odmah je bila supergrupa**, `chat_id` `-1004295957021`, prije nego je
-u nju išta poslano. Migracija se dakle možda nikad neće dogoditi na ovoj
-instanci. Rukovanje ipak ostaje: postojeće obične grupe se i dalje nadograđuju,
-a cijena koda je nekoliko redaka naspram tihog pada koji traje mjesecima.
+### Bolje od hvatanja migracije: izazvati je odmah
+
+Grupa ove instance bila je supergrupa **prije prve poruke**, `chat_id`
+`-1004295957021`. To se nije dogodilo samo od sebe. Matija svaku grupu odmah po
+stvaranju otvori u Settings i uključi **Members → Visible message history**, čime
+je Telegram na licu mjesta pretvori u supergrupu.
+
+To nije navika nego ispravno rješenje zamke, i **preporučeni postupak pri
+postavljanju**: migracija se izazove prije nego itko ikamo spremi `chat_id`, pa
+je prvi id koji sustav vidi već konačan. Hvatanje migracije naknadno oslanja se
+na to da kod za nju postoji i da je ispravan; izazvana migracija ne oslanja se
+ni na što.
+
+Rukovanje u kodu ipak ostaje, jer postojeće obične grupe se i dalje nadograđuju,
+a cijena je nekoliko redaka naspram tihog pada koji traje mjesecima.
+
+### Zašto baš to prebaci grupu
+
+Obična grupa i supergrupa nisu ista stvar u dvije verzije. U MTProto sloju su
+**dvije različite strukture**, a frontend ih crta identično:
+
+> Supergroups are actually channels: they are represented by `channel`
+> constructors, with the `megagroup` flag set to true.
+> — [core.telegram.org/api/channel](https://core.telegram.org/api/channel)
+
+Obična grupa je `chat` konstruktor, supergrupa je `channel` s `megagroup`. Zato
+`chat_id` **mora** biti nov: ne dodjeljuje se drugi broj istom objektu, nego se
+sadržaj seli u objekt iz drugog imenika. Stari `chat` ostaje postojati s poljima
+`migrated_to` i `deactivated`, a Bot API zadržava `chat.type: "group"` zauvijek,
+pa je kompatibilnost unatrag potpuna.
+
+„Visible message history" **nije izrazivo** u `chat` strukturi: u običnoj grupi
+novi članovi povijest naprosto ne vide i to se ne može promijeniti. Kad se to
+zatraži, Telegramu ne preostaje nego napraviti `channel` i preseliti sadržaj.
+Ista tri okidača, svi iz istog razloga: **javni username**, **eksplicitna
+postavka povijesti**, i **prelazak 200 članova**.
+
+| | Obična grupa (`chat`) | Supergrupa (`channel` + `megagroup`) |
+|---|---|---|
+| Članova | 200 | 200 000, gigagrupa bez limita |
+| `chat_id` | `-123456789` | `-100` + interni id |
+| ID poruka | dijeli **jedan globalni niz** s privatnim chatovima | vlastiti niz po chatu |
+| Poveznica na poruku | ne postoji | `t.me/c/<id>/<msg_id>` |
+| Povijest za nove članove | ne vide je, nepromjenjivo | Visible ili Hidden |
+| Javni username | ne | da |
+| Ovlasti admina | praktički sve ili ništa | granularno, po pravu i po članu |
+| Restrikcije člana | ne | da, mute i ban |
+| Slow mode | ne | da, `slow_mode_delay` |
+| Topics | ne | da, `is_forum` |
+| Vezanje uz kanal | ne | da, `linked_chat_id` |
+| Admin log | ne | da, Recent Actions |
+| Dedup stanja | polje `version` | `pts`, kao kanali |
 
 ### 2. Dnevni sažetak kao heartbeat
 
@@ -145,10 +192,12 @@ promijenila. Ono što se ne smije izgubiti ide u log.
 1. **Bot.** U Telegramu otvori [@BotFather](https://t.me/BotFather), pa
    `/newbot`. Ime po volji, username mora završavati na `bot`. Vrati token u
    obliku `123456789:AA...`.
-2. **Grupa.** Nova grupa, dodaj bota kao člana. Pošalji u nju
-   `/start@imebota` **prije** sljedećeg koraka: bot s privacy mode ON (to je
-   default) vidi samo poruke koje ga spominju, pa bez toga `getUpdates` vraća
-   prazno.
+2. **Grupa.** Nova grupa, pa **odmah** Settings → Members → *Visible message
+   history*. Time postaje supergrupa prije nego itko spremi njezin `chat_id`,
+   što zamku iz prethodnog odjeljka rješava unaprijed. Zatim dodaj bota kao
+   člana i pošalji u nju `/start@imebota` **prije** sljedećeg koraka: bot s
+   privacy mode ON (to je default) vidi samo poruke koje ga spominju, pa bez
+   toga `getUpdates` vraća prazno.
 3. **Tajne.** Token nikad ne prolazi kroz ispis:
    ```bash
    npx wrangler secret put TELEGRAM_BOT_TOKEN   # zalijepi, unos se ne ispisuje
