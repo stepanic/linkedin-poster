@@ -7,5 +7,10 @@ API_TOKEN=
 # Guards GET /auth/start so nobody else can bind their LinkedIn account to
 # your Worker. Generate: openssl rand -hex 32
 SETUP_KEY=
-# Optional. Any URL that accepts a JSON POST — used for the renewal reminder.
+# Optional. Any URL that accepts a JSON POST. Used only when Telegram is not
+# configured, and kept for anything that already points at it.
 NOTIFY_WEBHOOK=
+# Telegram notifications. Create the bot with @BotFather, then read the group's
+# id from /telegram/chatid?key=<SETUP_KEY>. See docs/2026-08-27-telegram-obavijesti.md
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=

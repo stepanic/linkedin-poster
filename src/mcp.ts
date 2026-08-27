@@ -9,6 +9,7 @@
 
 import { createTextPost, LinkedInError, type Visibility } from "./linkedin";
 import { errorsOf, formatFindings, lint } from "./lint";
+import { announceBlocked, announceNoToken, announcePosted, announceRejected } from "./notify";
 import { daysLeft, isExpired, readToken } from "./tokens";
 
 /** Falls back to this only when a client does not state its own revision. */
@@ -77,6 +78,7 @@ async function callTool(
   name: string,
   args: Record<string, unknown>,
   env: Env,
+  ctx: ExecutionContext,
 ): Promise<ReturnType<typeof textResult>> {
   if (name === "linkedin_check") {
     const text = typeof args.text === "string" ? args.text : "";
@@ -117,6 +119,7 @@ async function callTool(
     const findings = lint(text);
     const errors = errorsOf(findings);
     if (errors.length > 0 && !force) {
+      ctx.waitUntil(announceBlocked(env, findings, text, "mcp"));
       return textResult(
         `Not published. Fix these first, or pass force: true to override.\n\n${formatFindings(findings)}`,
         true,
@@ -124,21 +127,26 @@ async function callTool(
     }
 
     const token = await readToken(env.TOKENS);
-    if (!token) {
-      return textResult("No LinkedIn token stored. Visit /auth/start?key=<SETUP_KEY> first.", true);
-    }
-    if (isExpired(token)) {
-      return textResult("LinkedIn token has expired. Re-authorize at /auth/start?key=<SETUP_KEY>.", true);
+    if (!token || isExpired(token)) {
+      ctx.waitUntil(announceNoToken(env, Boolean(token), "mcp"));
+      return textResult(
+        token
+          ? "LinkedIn token has expired. Re-authorize at /auth/start?key=<SETUP_KEY>."
+          : "No LinkedIn token stored. Visit /auth/start?key=<SETUP_KEY> first.",
+        true,
+      );
     }
 
     try {
       const result = await createTextPost(token, env.LINKEDIN_VERSION, text, visibility);
+      ctx.waitUntil(announcePosted(env, result, text, visibility, "mcp", findings));
       const warnings = findings.filter((f) => f.severity === "warning");
       const note = warnings.length > 0 ? `\n\nPublished with warnings:\n${formatFindings(warnings)}` : "";
       return textResult(`Published (${visibility}).\n${result.url || result.urn}${note}`);
     } catch (error) {
       if (error instanceof LinkedInError) {
         console.error(JSON.stringify({ event: "post_failed", status: error.status, body: error.body.slice(0, 500) }));
+        ctx.waitUntil(announceRejected(env, error, "mcp"));
         return textResult(`LinkedIn rejected the post (${error.status}): ${error.body.slice(0, 500)}`, true);
       }
       throw error;
@@ -152,7 +160,11 @@ async function callTool(
  * Handles one JSON-RPC message. Returns null for notifications, which carry no
  * id and must not be answered with a body.
  */
-export async function handleMcpMessage(message: JsonRpcRequest, env: Env): Promise<JsonRpcResponse | null> {
+export async function handleMcpMessage(
+  message: JsonRpcRequest,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<JsonRpcResponse | null> {
   const id = message.id ?? null;
 
   switch (message.method) {
@@ -182,7 +194,7 @@ export async function handleMcpMessage(message: JsonRpcRequest, env: Env): Promi
       if (typeof name !== "string") return fail(id, -32602, "Missing tool name");
       const args = (message.params?.arguments as Record<string, unknown> | undefined) ?? {};
       try {
-        return ok(id, await callTool(name, args, env));
+        return ok(id, await callTool(name, args, env, ctx));
       } catch (error) {
         console.error(JSON.stringify({ event: "tool_error", tool: name, message: String(error) }));
         return fail(id, -32603, `Tool failed: ${String(error)}`);

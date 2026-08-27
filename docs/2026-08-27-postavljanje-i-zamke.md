@@ -37,7 +37,7 @@ flowchart LR
     C -->|"ne, dan 60+"| E["/auth/start<br/>+ ekran pristanka<br/>dva klika"]
     D --> B
     E --> B
-    B -.->|"cron 09:00 UTC<br/>na 14, 7, 3, 1 dan"| F["podsjetnik"]
+    B -.->|"cron 09:00 UTC<br/>svaki dan od 14. unaprijed"| F["alarm u Telegramu"]
     F --> D
 
     style D fill:#0f2b3d,stroke:#2b7fb8,color:#e6f1f8
@@ -133,5 +133,7 @@ Usvojeno u ovoj sesiji i vrijedi dalje:
 ## Vezani dokumenti
 
 - [`../README.md`](../README.md) — što servis radi i kako se instalira
+- [`2026-08-27-telegram-obavijesti.md`](2026-08-27-telegram-obavijesti.md) —
+  Telegram sloj, migracija u supergrupu i podsjetnik na obnovu tokena
 - `~/.claude/CLAUDE.md` — pravilo o pinanju preglednika i zabrani `open` za URL
   koji treba pratiti

@@ -9,7 +9,8 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types",
     "typecheck": "tsc --noEmit",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "test:telegram": "node --experimental-strip-types scripts/test-telegram.ts"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

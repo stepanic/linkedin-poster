@@ -8,6 +8,15 @@
 
 export const TOKEN_KEY = "token";
 export const LAST_NOTIFIED_KEY = "last-renewal-notice";
+/** Holds the nonce that makes the renewal link in a chat message work. */
+export const RENEW_NONCE_KEY = "renew:nonce";
+
+/**
+ * A renewal link has to outlive the gap between two reminders (14, 7, 3, 1 and
+ * 0 days out, so seven days at the widest) or the older message would carry a
+ * dead link.
+ */
+const RENEW_NONCE_TTL_SECONDS = 7 * 86_400;
 
 export interface TokenRecord {
   accessToken: string;
@@ -59,4 +68,34 @@ export function bearerFrom(request: Request): string | null {
   if (!header) return null;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1] ?? null;
+}
+
+/**
+ * Mints the one-time credential behind the renewal link in a chat message.
+ *
+ * The alternative was putting SETUP_KEY in the link, which would park a
+ * long-lived secret in a chat log and on Telegram's servers for good. A nonce
+ * costs one KV write, expires on its own, and is thrown away the moment a token
+ * is stored, so a message that has already been acted on stops being useful to
+ * anyone who reads it later.
+ *
+ * Each minting replaces the previous nonce: only the newest reminder works.
+ */
+export async function mintRenewalNonce(kv: KVNamespace): Promise<string> {
+  const nonce = crypto.randomUUID().replace(/-/g, "");
+  await kv.put(RENEW_NONCE_KEY, nonce, { expirationTtl: RENEW_NONCE_TTL_SECONDS });
+  return nonce;
+}
+
+/** True when the presented nonce is the current one. */
+export async function renewalNonceMatches(kv: KVNamespace, presented: string): Promise<boolean> {
+  if (!presented) return false;
+  const stored = await kv.get(RENEW_NONCE_KEY);
+  if (!stored) return false;
+  return await secretsMatch(presented, stored);
+}
+
+/** Called once a fresh token is stored: the outstanding link has done its job. */
+export async function clearRenewalNonce(kv: KVNamespace): Promise<void> {
+  await kv.delete(RENEW_NONCE_KEY);
 }

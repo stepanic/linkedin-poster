@@ -12,7 +12,8 @@ shipping. This README has no em-dashes in it either, which is the point.
 Claude Code ──MCP──┐
                    ├──> Worker ──> LinkedIn Posts API ──> your feed
 curl / CI ──HTTP───┘      │
-                          └──> KV (one 60-day token) + daily cron reminder
+                          ├──> KV (one 60-day token) + daily cron
+                          └──> Telegram group (what happened, and what broke)
 ```
 
 ## What it is not
@@ -34,8 +35,9 @@ and just redirects. So renewal is one click every seven weeks, as long as you do
 it before the token dies. Miss the window and you get the consent screen back,
 which is two clicks instead of one.
 
-That is why this service ships with a cron trigger. It counts the days down and
-pings you at 14, 7, 3 and 1 days out, while silent renewal still works.
+That is why this service ships with a cron trigger. From 14 days out it puts a
+renewal alarm at the top of the daily summary, every morning, while silent
+renewal still works. See [Notifications](#notifications).
 
 ## Setup
 
@@ -71,7 +73,9 @@ npx wrangler secret put LINKEDIN_CLIENT_ID
 npx wrangler secret put LINKEDIN_CLIENT_SECRET
 npx wrangler secret put API_TOKEN     # openssl rand -hex 32, guards /post and /mcp
 npx wrangler secret put SETUP_KEY     # openssl rand -hex 32, guards /auth/start
-npx wrangler secret put NOTIFY_WEBHOOK  # optional, any URL taking a JSON POST
+npx wrangler secret put NOTIFY_WEBHOOK    # optional, any URL taking a JSON POST
+npx wrangler secret put TELEGRAM_BOT_TOKEN # optional, see Notifications below
+npx wrangler secret put TELEGRAM_CHAT_ID
 
 npm run deploy
 ```
@@ -121,6 +125,67 @@ curl -s https://your-worker.example.com/status -H "Authorization: Bearer $API_TO
 `/post` returns `201` with the post URN and its public URL, `422` when the linter
 blocks it, `503` when the token is missing or dead.
 
+## Notifications
+
+Without this the service fails the way every unattended service fails: quietly,
+and you find out on the day a post does not go out. A Telegram group fixes that
+for the price of one bot.
+
+```bash
+# 1. @BotFather in Telegram, /newbot, copy the token
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+
+# 2. make a group, add the bot, send /start@yourbot in it
+#    (a bot with privacy mode on sees only messages that mention it)
+
+# 3. read the group id back, then store it
+open "https://your-worker.example.com/telegram/chatid?key=<SETUP_KEY>"
+npx wrangler secret put TELEGRAM_CHAT_ID
+
+# 4. prove it works
+open "https://your-worker.example.com/telegram/test?key=<SETUP_KEY>"
+```
+
+What arrives:
+
+| Event | When |
+|---|---|
+| Daily summary | every cron run, quiet days included |
+| Renewal alarm | from 14 days out, on top of that day's summary |
+| Reconnected | a fresh token was stored, with the new expiry date |
+| Posted | every published post, with its link |
+| Blocked | the linter refused a draft, with the rules that fired |
+| Rejected | LinkedIn refused a post, with a guess at why |
+| No usable token | a publish attempt found the token missing or dead |
+| Quota | the day crosses 120 of the 150 requests LinkedIn allows a member |
+
+Two design decisions worth knowing before you change anything:
+
+**The daily summary is the heartbeat.** It goes out even when nothing happened,
+so its absence is itself the alarm and nothing has to monitor the monitor. That
+is also why a renewal alarm rides on top of the summary rather than arriving as
+a second message: exactly one message a morning, or you train yourself to skim.
+
+**The renewal link carries a one-time nonce, not the setup key.** A link with
+`SETUP_KEY` in it would park a long-lived secret in a chat log for good. The
+cron mints a nonce instead, valid for seven days, replaced by the next reminder,
+and deleted the moment a token is stored. Link previews are disabled on every
+message so Telegram cannot spend the nonce by prefetching it.
+
+Set none of it and the service behaves exactly as it did before: `NOTIFY_WEBHOOK`
+if you have one, the log if you do not.
+
+`GET /telegram/preview?key=<SETUP_KEY>&kind=daily` renders any message without
+sending it, which is how to edit the wording without spamming the group. Add
+`&send=1` to see it on a phone.
+
+The Bot API transport is tested against a local stub, including the supergroup
+migration that silently breaks Telegram bots months after setup:
+
+```bash
+npm run test:telegram
+```
+
 ## The linter
 
 Errors block publishing; warnings do not.
@@ -161,6 +226,9 @@ one person's writing conventions, not a universal standard.
 | `src/mcp.ts` | MCP server, hand-rolled JSON-RPC, stateless |
 | `src/lint.ts` | The voice linter |
 | `src/tokens.ts` | KV token record, expiry maths, timing-safe secret compare |
+| `src/notify.ts` | Which events reach the group, and in what words |
+| `src/telegram.ts` | Bot API transport, retries, supergroup migration |
+| `src/stats.ts` | The day's counters, which the summary reads back |
 
 ## Local development
 
@@ -182,6 +250,11 @@ name containing "LinkedIn", the irreversible Page association, OAuth scopes that
 stay empty until you refresh the page, `%20` versus `+` in the scope parameter, a
 negative DNS cache that made a working deployment look dead, and how secrets were
 handled so none of them passed through a terminal.
+
+[`docs/2026-08-27-telegram-obavijesti.md`](docs/2026-08-27-telegram-obavijesti.md)
+covers the notification layer: the supergroup migration that breaks Telegram bots
+in silence, why the heartbeat is a summary rather than a ping, and why the
+renewal link carries a nonce.
 
 ## Licence
 
