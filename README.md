@@ -140,8 +140,10 @@ one person's writing conventions, not a universal standard.
 
 ## Things that will surprise you
 
-- **The Posts API does not scrape URLs.** A link in your text stays a bare link.
-  A real preview card needs a thumbnail uploaded through the Images API plus a
+- **The Posts API does not scrape URLs, but LinkedIn still linkifies them.**
+  Verified on a live post: a bare URL is shortened to `lnkd.in/...` and is
+  clickable. What you do not get is the preview card with an image and title. For
+  that you need a thumbnail uploaded through the Images API plus a
   `content.article` block. Not implemented here yet.
 - **`LinkedIn-Version` is mandatory and versions get sunset.** `202508` went dark
   on 17 August 2026. Treat the value in `wrangler.jsonc` as a maintenance item.
@@ -171,6 +173,15 @@ npm run dev
 
 `wrangler dev --local` gives you a local KV, so the whole flow short of the real
 LinkedIn calls can be exercised without credentials.
+
+## Notes from a real setup
+
+[`docs/2026-08-27-postavljanje-i-zamke.md`](docs/2026-08-27-postavljanje-i-zamke.md)
+records what setting this up from zero actually cost: the portal rejecting any app
+name containing "LinkedIn", the irreversible Page association, OAuth scopes that
+stay empty until you refresh the page, `%20` versus `+` in the scope parameter, a
+negative DNS cache that made a working deployment look dead, and how secrets were
+handled so none of them passed through a terminal.
 
 ## Licence
 
