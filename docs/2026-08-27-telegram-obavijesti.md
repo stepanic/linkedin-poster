@@ -6,6 +6,15 @@ Zapisano 2026-08-27, isti dan kad je servis prvi put objavio post. Ovdje je
 servis radi vidi [`../README.md`](../README.md), za postavljanje od nule
 [`2026-08-27-postavljanje-i-zamke.md`](2026-08-27-postavljanje-i-zamke.md).
 
+## Stanje instance
+
+| | |
+|---|---|
+| Bot | `@ms_social_poster_bot`, prikazno ime `ms-social-poster-bot` |
+| Grupa | `ms-social-poster`, `chat_id` `-1004295957021` |
+| Tajne | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` na Workeru |
+| Prva poruka | 2026-08-27, isti dan kad je servis proradio |
+
 ## Problem koji ovo rješava
 
 Token traje 60 dana i **ne može se obnoviti programski**. Bez podsjetnika istek
@@ -44,6 +53,12 @@ npm run test:telegram
 `scripts/test-telegram.ts` odigra migraciju, rate limit, ispad i izbacivanje
 bota iz grupe. Nema test frameworka: Node skida tipove, a `src/telegram.ts`
 nema nijedan import, pa se učitava takav kakav jest.
+
+**Zapažanje iz ovog postavljanja:** grupa stvorena 2026-08-27 kroz Telegram
+klijent **odmah je bila supergrupa**, `chat_id` `-1004295957021`, prije nego je
+u nju išta poslano. Migracija se dakle možda nikad neće dogoditi na ovoj
+instanci. Rukovanje ipak ostaje: postojeće obične grupe se i dalje nadograđuju,
+a cijena koda je nekoliko redaka naspram tihog pada koji traje mjesecima.
 
 ### 2. Dnevni sažetak kao heartbeat
 

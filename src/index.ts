@@ -17,7 +17,7 @@ import { errorsOf, formatFindings, lint } from "./lint";
 import { handleMcpMessage } from "./mcp";
 import { announceBlocked, announceNoToken, announcePosted, announceRejected, notify, type NotifyEvent, render } from "./notify";
 import { bump, dayKey, readStats } from "./stats";
-import { CHAT_ID_KEY, discoverChats, sendTelegram, telegramConfig } from "./telegram";
+import { botIdentity, CHAT_ID_KEY, discoverChats, sendTelegram, telegramConfig } from "./telegram";
 import {
   bearerFrom,
   clearRenewalNonce,
@@ -237,14 +237,20 @@ async function handleTelegramChatId(request: Request, env: Env, ctx: ExecutionCo
     return json({ error: "TELEGRAM_BOT_TOKEN is not set" }, 503);
   }
 
+  const bot = await botIdentity(env.TELEGRAM_BOT_TOKEN);
+  if (!bot.ok) {
+    return json({ error: "the bot token was refused", detail: bot.error }, 502);
+  }
+
   const chats = await discoverChats(env.TELEGRAM_BOT_TOKEN);
   return json({
+    bot: { username: bot.username, name: bot.name },
     chats,
     configured: env.TELEGRAM_CHAT_ID || null,
     adopted: await env.TOKENS.get(CHAT_ID_KEY),
     hint:
       chats.length === 0
-        ? "No updates yet. A bot with privacy mode on only sees messages that mention it: send /start@yourbot in the group, then reload."
+        ? `No updates yet. A bot with privacy mode on only sees messages that mention it: send /start@${bot.username} in the group, then reload.`
         : "Set the id you want with: wrangler secret put TELEGRAM_CHAT_ID",
   });
 }

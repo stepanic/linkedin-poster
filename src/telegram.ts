@@ -135,6 +135,33 @@ export async function sendTelegram(
   return false;
 }
 
+export interface BotIdentity {
+  ok: boolean;
+  username?: string;
+  name?: string;
+  error?: string;
+}
+
+/**
+ * Confirms the token actually belongs to a bot, and hands back the username.
+ *
+ * Without this an empty chat list is ambiguous: a bad token and a group nobody
+ * has posted in look identical from the outside. The username is also the thing
+ * you need to type to wake a privacy-mode bot up.
+ */
+export async function botIdentity(botToken: string, apiBase = API): Promise<BotIdentity> {
+  const response = await fetch(`${apiBase}/bot${botToken}/getMe`);
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    description?: string;
+    result?: { username?: string; first_name?: string };
+  };
+  if (!payload.ok || !payload.result) {
+    return { ok: false, error: payload.description ?? `getMe returned ${response.status}` };
+  }
+  return { ok: true, username: payload.result.username, name: payload.result.first_name };
+}
+
 export interface DiscoveredChat {
   id: string;
   title: string;
