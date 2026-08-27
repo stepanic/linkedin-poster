@@ -117,6 +117,28 @@ je vrijednost još jednom prošla, pa tek onda počela vraćati 403. Ako rotira�
 iz sigurnosnih razloga, **provjeri da je stari doista mrtav** umjesto da
 pretpostaviš.
 
+Ponovilo se isti dan pri postavljanju `TELEGRAM_BOT_TOKEN` i `TELEGRAM_CHAT_ID`:
+oba puta je Worker nakon uspješnog `wrangler secret put` još nekoliko sekundi
+tvrdio da tajna **nije postavljena**. Dvije pojave od dvije, dakle to nije
+anomalija nego ponašanje na koje treba računati. Ne traži grešku u kodu prvih
+pola minute, nego čekaj u petlji:
+
+```bash
+until curl -s "$URL" | grep -q '"sent": true'; do sleep 5; done
+```
+
+**`wrangler kv key put --local` ne piše u isti KV koji vidi `wrangler dev`.**
+Pokušaj da se lokalni KV napuni tokenom prije pokretanja dev servera prošao je
+bez greške, a `wrangler dev` je i dalje javljao da tokena nema. Razlog: CLI piše
+u vlastiti direktorij pod `.wrangler/state/v3/kv/<namespace>`, dok dev server
+koristi miniflareov `miniflare-KVNamespaceObject`. `wrangler kv key list --local
+--binding TOKENS` vraća `[]` i nakon uspješnog `put`, što potvrđuje da su to dva
+odvojena spremnika.
+
+Tiho je jer nijedna strana ne prijavlja grešku. **Ne pokušavaj seedati lokalni
+KV kroz CLI**; napuni ga kroz sam Worker (rutu koja piše) ili provjeru odradi na
+deployanoj instanci, gdje je KV ionako pravi.
+
 ## Postupanje s tajnama
 
 Usvojeno u ovoj sesiji i vrijedi dalje:
