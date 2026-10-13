@@ -20,6 +20,13 @@
 // years of episodes on disk would otherwise draft all of them, so `--seed`
 // records everything in the window without writing a word.
 //
+// After each draft, the episode's chapters follow it into the group, one
+// message per chapter with a large preview of that moment, the same pattern as
+// share_to_whatsapp.js in fetch.domovina.tv. Chapters come from the CDN, not
+// the disk, so every link points at a timestamp the live page actually has.
+// Sent chapters are recorded in the state file, so a rerun fills in what failed
+// instead of repeating what arrived.
+//
 // Usage:
 //   node --experimental-strip-types scripts/draft-episodes.ts [flags]
 //
@@ -29,6 +36,9 @@
 //   --seed           mark everything in the window as done, write no drafts
 //   --dry-run        print the drafts, send nothing, touch no state
 //   --no-cdn-check   skip gate 3 (for testing before an upload has run)
+//   --no-chapters    drafts only, no chapter messages after them
+//   --chapters-only  with --id: send that episode's chapters, write no draft
+//   --chapter-delay S  seconds between chapter messages (default 3.5)
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -69,6 +79,11 @@ const ONLY_ID = option("--id");
 const SEED = flag("--seed");
 const DRY_RUN = flag("--dry-run");
 const CDN_CHECK = !flag("--no-cdn-check");
+const CHAPTERS = !flag("--no-chapters");
+const CHAPTERS_ONLY = flag("--chapters-only");
+// A Telegram group takes about twenty messages a minute from one bot. Three
+// and a half seconds stays under that with room for the draft itself.
+const CHAPTER_DELAY_MS = Number(option("--chapter-delay") ?? process.env.CHAPTER_DELAY_SEC ?? 3.5) * 1000;
 
 interface Episode {
   id: string;
@@ -92,6 +107,8 @@ interface Episode {
 interface State {
   version: 1;
   drafted: Record<string, { at: string; channel: string; title: string }>;
+  /** Chapter start seconds already in the group, per episode. */
+  chapters?: Record<string, { at: string; sent: number[] }>;
 }
 
 function readState(): State {
@@ -446,10 +463,111 @@ async function parkDraft(episode: Episode, text: string, token: string): Promise
   }
 }
 
+// ─── chapters ─────────────────────────────────────────────────────────────
+
+interface Chapter {
+  sec: number;
+  title: string;
+}
+
+/** "HH:MM:SS", "MM:SS" or "SS" to seconds; null for anything else. */
+function toSeconds(stamp: unknown): number | null {
+  if (typeof stamp !== "string" || !/^\d+(:\d+){0,2}$/.test(stamp.trim())) return null;
+  const parts = stamp.trim().split(":").map(Number);
+  while (parts.length < 3) parts.unshift(0);
+  const [h, m, s] = parts as [number, number, number];
+  if (m >= 60 || s >= 60) return null;
+  return h * 3600 + m * 60 + s;
+}
+
+/**
+ * The episode's chapters, as the live page has them: every section of every
+ * iteration, by screenshot timestamp, sorted, first one wins on a duplicate
+ * second. Same rules as extractChapters in share_to_whatsapp.js.
+ */
+async function fetchChapters(id: string): Promise<Chapter[]> {
+  const response = await fetch(`${CDN_BASE}/data/${id}/article.json`);
+  if (!response.ok) throw new Error(`CDN nema article.json za ${id} (${response.status})`);
+  const article = (await response.json()) as {
+    iterations?: Array<{ sections?: Array<{ subtitle?: string; screenshot_timestamp?: string }> }>;
+  };
+
+  const seen = new Set<number>();
+  const chapters: Chapter[] = [];
+  for (const iteration of article.iterations ?? []) {
+    for (const section of iteration.sections ?? []) {
+      const sec = toSeconds(section.screenshot_timestamp);
+      if (sec === null || seen.has(sec)) continue;
+      seen.add(sec);
+      chapters.push({ sec, title: (section.subtitle ?? "").trim() });
+    }
+  }
+  return chapters.sort((a, b) => a.sec - b.sec);
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms));
+
+/**
+ * Sends every chapter not yet in the group, in order, and records each one as
+ * it lands. Stops at the first failure rather than leaving holes in the
+ * sequence: the next run resumes from there.
+ */
+async function shareChapters(id: string, token: string, state: State): Promise<void> {
+  let chapters: Chapter[];
+  try {
+    chapters = await fetchChapters(id);
+  } catch (error) {
+    console.error(`   ❌ poglavlja: ${String(error)}`);
+    return;
+  }
+
+  const record = (state.chapters ??= {})[id] ?? { at: new Date().toISOString(), sent: [] };
+  const done = new Set(record.sent);
+  const todo = chapters.filter((chapter) => !done.has(chapter.sec));
+  console.log(`   📚 ${chapters.length} poglavlja, ${todo.length} za poslati`);
+
+  if (DRY_RUN) {
+    for (const chapter of todo) console.log(`      ${chapter.sec}s · ${chapter.title}`);
+    return;
+  }
+
+  let sent = 0;
+  for (const chapter of todo) {
+    if (sent > 0) await sleep(CHAPTER_DELAY_MS);
+    const response = await fetch(`${POSTER_BASE}/drafts/${id}/chapters`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(chapter),
+    }).catch((error: unknown) => ({ ok: false, status: 0, text: async () => String(error) }));
+
+    if (!response.ok) {
+      console.error(`   ❌ poglavlje ${chapter.sec}s nije poslano (${response.status}): ${(await response.text()).slice(0, 200)}`);
+      break;
+    }
+    record.sent.push(chapter.sec);
+    record.at = new Date().toISOString();
+    state.chapters[id] = record;
+    writeState(state);
+    sent += 1;
+  }
+  console.log(`   ✅ ${sent}/${todo.length} poglavlja u Telegram grupi`);
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   const state = readState();
+
+  if (CHAPTERS_ONLY) {
+    if (!ONLY_ID) {
+      console.error("❌ --chapters-only traži --id.");
+      process.exit(1);
+    }
+    console.log(`▶️  poglavlja za ${ONLY_ID}`);
+    await shareChapters(ONLY_ID, DRY_RUN ? "" : apiToken(), state);
+    return;
+  }
+
   const episodes = findEpisodes();
 
   console.log(`📄 ${episodes.length} epizoda u prozoru od ${HOURS}h (${OUTPUT_DIR})`);
@@ -516,6 +634,13 @@ async function main(): Promise<void> {
     writeState(state);
     written += 1;
     console.log(`   ✅ draft ${episode.id} u Telegram grupi`);
+
+    if (CHAPTERS) {
+      // The Worker announces the draft after it answers. A short pause lets the
+      // draft and its card land first, so the chapters sit underneath them.
+      await sleep(5000);
+      await shareChapters(episode.id, token, state);
+    }
   }
 
   console.log(`\n🧾 Gotovo: ${written} draft(ova)${DRY_RUN ? " (dry run)" : ""}.`);

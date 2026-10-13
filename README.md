@@ -219,7 +219,16 @@ npm run drafts -- --dry-run          # write the posts, send nothing
 npm run drafts                       # write them and put them in the group
 npm run drafts -- --id VIDEOID       # one specific episode, window ignored
 npm run drafts -- --seed             # mark the window as done, write nothing
+npm run drafts -- --id VIDEOID --chapters-only   # resend just the chapters
 ```
+
+Each draft is followed by the episode's chapters, one silent message per
+chapter (`POST /drafts/{id}/chapters`), each with a large preview of
+`domovina.ai/v/{id}/t/{sec}`. It is the same pattern as `share_to_whatsapp.js`
+in `fetch.domovina.tv`. Chapters come from the CDN's `article.json`, are paced
+3.5 s apart to stay under Telegram's group limit, and are recorded in
+`.state/drafted.json` as they land, so a rerun only sends what is missing.
+`--no-chapters` turns them off.
 
 The script lives here rather than in the pipeline repo because everything it
 knows about is a LinkedIn concern: the voice, the linter, the bearer token, the

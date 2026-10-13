@@ -89,6 +89,36 @@ jer Telegram povuče svaki link koji prikazuje, a prefetch linka za obnovu token
 potrošio bi jednokratni nonce prije nego ga itko takne. Zato `sendTelegram`
 prima `previewUrl`, a `notify` ga postavlja samo za `kind: "draft_link"`.
 
+### Poglavlja ispod drafta (od 2026-10-14)
+
+Nakon kartice slijede sva poglavlja epizode, svako kao zasebna poruka:
+`⏱ 5:20 · naslov` pa link `domovina.ai/v/{id}/t/{sek}` s velikim previewom
+tog trenutka (`og-t-{sek}.jpg`). Isti obrazac kao `share_to_whatsapp.js` u
+`fetch.domovina.tv`, koji je 08.10. poslao Grmoju #114 Ivanu Orloviću; ovdje
+nije trebala zakrpa mosta jer Telegram og-tagove resolva sam.
+
+Odluke i zašto:
+
+- **Petlja je na Macu, ne u Workeru.** Worker ima `POST /drafts/{id}/chapters`
+  koji šalje JEDNO poglavlje i odgovara tek kad ga Telegram primi. Epizoda ima
+  30-46 poglavlja, a grupa prima ~20 poruka u minuti od jednog bota, pa run traje
+  2-3 minute; `waitUntil` nakon odgovora runtime reže na 30 s. Usput, jedan
+  request po poglavlju drži broj subrequestova po pozivu na jedan.
+- **Razmak 3,5 s** (`--chapter-delay`). Ispod limita grupe, s mjestom za draft.
+  Na 429 `sendTelegram` ionako poštuje `retry_after`.
+- **Tihe poruke** (`disable_notification`). Zvoni draft, ne 36 poglavlja.
+- **Poglavlja s CDN-a**, ne s diska: link mora voditi na timestamp koji živa
+  stranica ima. Pravila izvlačenja kopirana iz `extractChapters` u WhatsApp
+  skripti (sve sekcije svih iteracija, sortirano, prva pobjeđuje na istoj sekundi).
+- **Stanje u `.state/drafted.json` pod `chapters[id].sent`**, zapisuje se poslije
+  svake uspješne poruke. Na prvoj grešci petlja staje, rerun dopunjava; nema rupa
+  ni duplikata.
+- **5 s pauze nakon `POST /drafts`**, jer Worker objavi draft tek nakon što odgovori
+  (`waitUntil`); bez pauze bi prvo poglavlje znalo stići iznad drafta.
+
+Ručno, za jednu epizodu: `npm run drafts -- --id VIDEOID --chapters-only`.
+Prvi put 2026-10-14 za `ja995FNQP3A` (Petar Šarić #115): 36/36.
+
 Objava je onda u Claude Codeu:
 
 ```

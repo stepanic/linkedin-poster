@@ -35,6 +35,7 @@ export type NotifyEvent =
   | { kind: "quota"; stats: DayStats }
   | { kind: "draft"; draft: EpisodeDraft; findings: Finding[] }
   | { kind: "draft_link"; draft: EpisodeDraft }
+  | { kind: "chapter"; chapter: EpisodeChapter }
   | {
       kind: "daily";
       day: string;
@@ -43,6 +44,27 @@ export type NotifyEvent =
       renewLink: string | null;
       drafts: DraftSummary[];
     };
+
+/** One chapter of an episode, as it lands in the group after the draft. */
+export interface EpisodeChapter {
+  id: string;
+  /** Start of the chapter, in seconds. The episode page deep-links to it. */
+  sec: number;
+  title: string;
+}
+
+/** The chapter's own page, whose Open Graph image is that moment's screenshot. */
+export function chapterUrl(chapter: EpisodeChapter): string {
+  return `https://domovina.ai/v/${chapter.id}/t/${chapter.sec}`;
+}
+
+/** Seconds as "M:SS" or "H:MM:SS", the format the og:title on the page uses. */
+function clock(sec: number): string {
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec % 60)}` : `${m}:${pad(sec % 60)}`;
+}
 
 export interface DailyToken {
   name?: string;
@@ -188,6 +210,18 @@ function renderDraftLink(event: Extract<NotifyEvent, { kind: "draft_link" }>): s
 }
 
 /**
+ * One chapter, one message, the same pattern as the WhatsApp share in
+ * fetch.domovina.tv. The link carries a large preview, so each chapter shows up
+ * as its own card with its own screenshot, and any of them can be forwarded on
+ * its own.
+ */
+function renderChapter(event: Extract<NotifyEvent, { kind: "chapter" }>): string {
+  const { chapter } = event;
+  const title = chapter.title ? ` · ${esc(chapter.title)}` : "";
+  return `⏱ <b>${clock(chapter.sec)}</b>${title}\n${esc(chapterUrl(chapter))}`;
+}
+
+/**
  * The heartbeat.
  *
  * On days a renewal reminder is due it leads with the alarm and carries the
@@ -264,6 +298,8 @@ export function render(event: NotifyEvent): string {
       return renderDraft(event);
     case "draft_link":
       return renderDraftLink(event);
+    case "chapter":
+      return renderChapter(event);
     case "daily":
       return renderDaily(event);
   }
@@ -288,7 +324,8 @@ export async function notify(env: Env, event: NotifyEvent): Promise<void> {
   // One message asks for a link preview: the follow-up that exists to show how
   // the episode page's Open Graph tags resolve. Everything else, the renewal
   // link above all, must never be prefetched by Telegram.
-  const previewUrl = event.kind === "draft_link" ? event.draft.url : undefined;
+  const previewUrl =
+    event.kind === "draft_link" ? event.draft.url : event.kind === "chapter" ? chapterUrl(event.chapter) : undefined;
   try {
     const config = await telegramConfig(env);
     if (config) {
@@ -352,6 +389,24 @@ export async function announceDrafted(env: Env, draft: EpisodeDraft, findings: F
   // Sent second, and after the draft rather than with it, so the card lands
   // under the text it belongs to and never on top of it.
   await notify(env, { kind: "draft_link", draft });
+}
+
+/**
+ * Sends one chapter and says whether it arrived.
+ *
+ * Unlike notify() this reports back, because the caller is a loop on the Mac
+ * that records what was sent and must not mark a chapter done that never left.
+ * Silent, too: forty chapters in a row should not buzz a phone forty times. The
+ * draft above them already did. No webhook fallback either, since a chapter
+ * card is only worth anything as a Telegram preview.
+ */
+export async function sendChapter(env: Env, chapter: EpisodeChapter): Promise<boolean> {
+  const config = await telegramConfig(env);
+  if (!config) return false;
+  return await sendTelegram(env, config, render({ kind: "chapter", chapter }), {
+    previewUrl: chapterUrl(chapter),
+    silent: true,
+  });
 }
 
 export async function announceBlocked(env: Env, findings: Finding[], text: string, source: Source): Promise<void> {

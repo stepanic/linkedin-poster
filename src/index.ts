@@ -11,6 +11,7 @@
 //   GET  /drafts/{id}      one draft, in full (bearer)
 //   POST /drafts/{id}/publish  publish a stored draft (bearer)
 //   DELETE /drafts/{id}    discard a draft (bearer)
+//   POST /drafts/{id}/chapters  send one chapter of the episode to the group (bearer)
 //   POST /mcp              MCP server, streamable HTTP (bearer)
 //   GET  /telegram/chatid  discover the group's chat id (guarded by SETUP_KEY)
 //   GET  /telegram/test    send a test message (guarded by SETUP_KEY)
@@ -30,6 +31,7 @@ import {
   notify,
   type NotifyEvent,
   render,
+  sendChapter,
   type Source,
 } from "./notify";
 import { bump, dayKey, readStats } from "./stats";
@@ -279,6 +281,34 @@ async function handleDraftCreate(request: Request, env: Env, ctx: ExecutionConte
   return json({ stored: true, id, chars: text.length, findings }, 201);
 }
 
+/**
+ * Sends one chapter of an episode to the group, and answers only once Telegram
+ * has it.
+ *
+ * One chapter per request on purpose. An episode has forty-odd chapters and the
+ * group takes about twenty messages a minute, so the whole run is two or three
+ * minutes of pacing. That belongs in the caller's loop, not in a waitUntil that
+ * the runtime cuts off after thirty seconds. The draft does not have to exist:
+ * the chapters stand on their own once it has been published or has expired.
+ */
+async function handleChapter(id: string, request: Request, env: Env): Promise<Response> {
+  if (!isDraftId(id)) return json({ error: "id must be a YouTube id" }, 400);
+
+  let payload: { sec?: unknown; title?: unknown };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return json({ error: "invalid JSON body" }, 400);
+  }
+
+  const sec = Number(payload.sec);
+  if (!Number.isInteger(sec) || sec < 0) return json({ error: "sec must be a whole number of seconds" }, 400);
+  const title = typeof payload.title === "string" ? payload.title.trim().slice(0, 300) : "";
+
+  const sent = await sendChapter(env, { id, sec, title });
+  return sent ? json({ sent: true, id, sec }, 201) : json({ sent: false, id, sec }, 502);
+}
+
 async function handleDraftPublish(id: string, request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const draft = await getDraft(env.TOKENS, id);
   if (!draft) return json({ error: "no such draft", id }, 404);
@@ -412,6 +442,9 @@ async function handleTelegramPreview(request: Request, env: Env, ctx: ExecutionC
       event = kind === "draft_link" ? { kind: "draft_link", draft } : { kind: "draft", draft, findings: lint(draft.text) };
       break;
     }
+    case "chapter":
+      event = { kind: "chapter", chapter: { id: "dQw4w9WgXcQ", sec: 754, title: "Sample chapter title" } };
+      break;
     case "daily": {
       const token = await readToken(env.TOKENS);
       const remaining = token ? Math.max(0, daysLeft(token)) : 0;
@@ -437,7 +470,7 @@ async function handleTelegramPreview(request: Request, env: Env, ctx: ExecutionC
       break;
     }
     default:
-      return json({ error: `unknown kind: ${kind}`, kinds: ["daily", "posted", "lint_blocked", "linkedin_rejected", "no_token", "reconnected", "quota", "draft", "draft_link"] }, 400);
+      return json({ error: `unknown kind: ${kind}`, kinds: ["daily", "posted", "lint_blocked", "linkedin_rejected", "no_token", "reconnected", "quota", "draft", "draft_link", "chapter"] }, 400);
   }
 
   const text = render(event);
@@ -534,6 +567,9 @@ export default {
         const [id = "", action] = rest.split("/");
         if (request.method === "POST" && action === "publish") {
           return await handleDraftPublish(id, request, env, ctx);
+        }
+        if (request.method === "POST" && action === "chapters") {
+          return await handleChapter(id, request, env);
         }
         if (request.method === "GET" && !action) {
           const draft = await getDraft(env.TOKENS, id);
