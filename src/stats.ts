@@ -25,6 +25,8 @@ const KEPT_POSTS = 8;
 export interface DayStats {
   /** Posts LinkedIn accepted. */
   posted: number;
+  /** Episode drafts the pipeline parked for review. Nothing was published. */
+  drafted: number;
   /** Drafts the linter refused. */
   blocked: number;
   /** Posts LinkedIn rejected. */
@@ -41,6 +43,7 @@ export interface DayStats {
 
 const EMPTY: DayStats = {
   posted: 0,
+  drafted: 0,
   blocked: 0,
   rejected: 0,
   noToken: 0,
@@ -63,7 +66,12 @@ async function writeStats(kv: KVNamespace, day: string, stats: DayStats): Promis
   await kv.put(`${STATS_PREFIX}${day}`, JSON.stringify(stats), { expirationTtl: STATS_TTL_SECONDS });
 }
 
-/** Requests that count against the member's daily allowance. */
+/**
+ * Requests that count against the member's daily allowance.
+ *
+ * Drafts are deliberately absent: parking one costs a KV write and a Telegram
+ * message, and never touches LinkedIn.
+ */
 export function quotaUsed(stats: DayStats): number {
   return stats.posted + stats.rejected;
 }
@@ -76,7 +84,7 @@ export function quotaUsed(stats: DayStats): number {
  */
 export async function bump(
   kv: KVNamespace,
-  field: "posted" | "blocked" | "rejected" | "noToken" | "unauthorized",
+  field: "posted" | "drafted" | "blocked" | "rejected" | "noToken" | "unauthorized",
   post?: { url: string; excerpt: string },
 ): Promise<DayStats> {
   const day = dayKey();
@@ -97,5 +105,7 @@ export async function markQuotaWarned(kv: KVNamespace): Promise<void> {
 
 /** True when nothing at all happened, which the summary states plainly. */
 export function isQuiet(stats: DayStats): boolean {
-  return stats.posted + stats.blocked + stats.rejected + stats.noToken + stats.unauthorized === 0;
+  return (
+    stats.posted + stats.drafted + stats.blocked + stats.rejected + stats.noToken + stats.unauthorized === 0
+  );
 }

@@ -78,12 +78,23 @@ export async function sendTelegram(
   env: Env,
   config: TelegramConfig,
   text: string,
-  options: { tries?: number; baseMs?: number; silent?: boolean; apiBase?: string } = {},
+  options: { tries?: number; baseMs?: number; silent?: boolean; apiBase?: string; previewUrl?: string } = {},
 ): Promise<boolean> {
   // apiBase is overridden only by scripts/test-telegram.ts, which points it at
   // a local stub to exercise the migration path. That path is otherwise
   // untestable until the day it fires, which is the worst day to find a bug.
-  const { tries = 4, baseMs = 1000, silent = false, apiBase = API } = options;
+  const { tries = 4, baseMs = 1000, silent = false, apiBase = API, previewUrl } = options;
+
+  // Previews are off by default and named explicitly when they are wanted.
+  //
+  // Off is the safe default: Telegram fetches every link it previews, and a
+  // prefetch of a renewal link would burn its one-time nonce before a human
+  // ever taps it. A draft is the opposite case. The whole point of showing the
+  // episode link is to see how the page's Open Graph tags resolve out in the
+  // world, so that one message asks for a large card.
+  const linkPreview = previewUrl
+    ? { url: previewUrl, prefer_large_media: true, show_above_text: false }
+    : { is_disabled: true };
   let chatId = config.chatId;
   const body = text.length > MAX_MESSAGE ? `${text.slice(0, MAX_MESSAGE)}\n…` : text;
 
@@ -98,9 +109,7 @@ export async function sendTelegram(
           chat_id: chatId,
           text: body,
           parse_mode: "HTML",
-          // Also stops Telegram from prefetching a renewal link and burning
-          // the one-time nonce before a human ever taps it.
-          link_preview_options: { is_disabled: true },
+          link_preview_options: linkPreview,
           disable_notification: silent,
         }),
       });

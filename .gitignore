@@ -1,6 +1,8 @@
 node_modules/
 .wrangler/
 .dev.vars
+# Which episodes already produced a draft. Local bookkeeping, not shared state.
+.state/
 .DS_Store
 # worker-configuration.d.ts is committed so a fresh clone typechecks;
 # regenerate with `npm run types` after editing wrangler.jsonc.

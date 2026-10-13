@@ -95,15 +95,21 @@ claude mcp add --transport http linkedin https://your-worker.example.com/mcp \
   --header "Authorization: Bearer $API_TOKEN"
 ```
 
-Three tools:
+The tools:
 
 | Tool | What it does |
 |---|---|
 | `linkedin_post` | Lints, then publishes. Refuses on errors unless `force: true`. |
 | `linkedin_check` | Lints without publishing. Use it while drafting. |
 | `linkedin_status` | Who it posts as, and how many days the token has left. |
+| `linkedin_drafts` | Lists the drafts waiting for review. |
+| `linkedin_draft` | Reads one draft in full, so it can be edited before it goes out. |
+| `linkedin_publish_draft` | Publishes a draft, as written or with replacement text. |
+| `linkedin_discard_draft` | Drops one without publishing. |
 
-Then, in a session: *"check this draft against the linter, then post it."*
+Then, in a session: *"check this draft against the linter, then post it."* Or,
+on a morning when the group has a draft in it: *"show me draft S5bScs9QuOk, drop
+the last paragraph and publish it."*
 
 ## Using it from a shell
 
@@ -158,6 +164,8 @@ What arrives:
 | Rejected | LinkedIn refused a post, with a guess at why |
 | No usable token | a publish attempt found the token missing or dead |
 | Quota | the day crosses 120 of the 150 requests LinkedIn allows a member |
+| Draft ready | the nightly pipeline wrote a post for a new episode, with the text in full |
+| Draft link | the episode link on its own, so its Open Graph card can be seen before the post goes out |
 
 Two design decisions worth knowing before you change anything:
 
@@ -185,6 +193,38 @@ migration that silently breaks Telegram bots months after setup:
 ```bash
 npm run test:telegram
 ```
+
+## Drafts from the domovina.ai pipeline
+
+This Worker also serves as the inbox for posts written by something else. The
+nightly pipeline in `fetch.domovina.tv` transcribes new podcast episodes,
+publishes them to domovina.ai, and then, as its last step, asks Claude for a
+LinkedIn post about each new one and parks it here.
+
+```
+nightly pipeline ──> scripts/draft-episodes.ts ──> POST /drafts ──> KV + Telegram
+                            (claude -p)                                   │
+                                                          you, next morning ▼
+                                                    linkedin_publish_draft
+```
+
+Nothing is published automatically, and nothing here can publish: `POST /drafts`
+stores and announces, and only a person calling `linkedin_publish_draft` (or
+`POST /drafts/{id}/publish`) sends anything to LinkedIn. Drafts expire on their
+own after 14 days, and the morning summary lists the ones still waiting.
+
+```bash
+# what the nightly does, by hand
+npm run drafts -- --dry-run          # write the posts, send nothing
+npm run drafts                       # write them and put them in the group
+npm run drafts -- --id VIDEOID       # one specific episode, window ignored
+npm run drafts -- --seed             # mark the window as done, write nothing
+```
+
+The script lives here rather than in the pipeline repo because everything it
+knows about is a LinkedIn concern: the voice, the linter, the bearer token, the
+group. It reads the pipeline's output directory and nothing else. See
+[`docs/2026-09-17-prijedlozi-objava-iz-nightlyja.md`](docs/2026-09-17-prijedlozi-objava-iz-nightlyja.md).
 
 ## The linter
 
@@ -229,6 +269,8 @@ one person's writing conventions, not a universal standard.
 | `src/notify.ts` | Which events reach the group, and in what words |
 | `src/telegram.ts` | Bot API transport, retries, supergroup migration |
 | `src/stats.ts` | The day's counters, which the summary reads back |
+| `src/drafts.ts` | Drafts in KV: store, list, discard, expire |
+| `scripts/draft-episodes.ts` | Turns new domovina.ai episodes into drafts, run by the nightly |
 
 ## Local development
 

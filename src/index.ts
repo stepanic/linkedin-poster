@@ -6,16 +6,32 @@
 //   GET  /auth/callback    OAuth redirect target, stores the token
 //   GET  /status           token state (bearer)
 //   POST /post             publish a text post (bearer)
+//   POST /drafts           park an episode draft and announce it (bearer)
+//   GET  /drafts           list drafts waiting for review (bearer)
+//   GET  /drafts/{id}      one draft, in full (bearer)
+//   POST /drafts/{id}/publish  publish a stored draft (bearer)
+//   DELETE /drafts/{id}    discard a draft (bearer)
 //   POST /mcp              MCP server, streamable HTTP (bearer)
 //   GET  /telegram/chatid  discover the group's chat id (guarded by SETUP_KEY)
 //   GET  /telegram/test    send a test message (guarded by SETUP_KEY)
 //   GET  /telegram/preview render any message without waiting for its event
 //   cron                   daily summary, and the renewal alarm on top of it
 
+import { deleteDraft, type EpisodeDraft, getDraft, isDraftId, listDrafts, putDraft } from "./drafts";
 import { authorizationUrl, createTextPost, exchangeCode, fetchUserInfo, LinkedInError, type Visibility } from "./linkedin";
 import { errorsOf, formatFindings, lint } from "./lint";
 import { handleMcpMessage } from "./mcp";
-import { announceBlocked, announceNoToken, announcePosted, announceRejected, notify, type NotifyEvent, render } from "./notify";
+import {
+  announceBlocked,
+  announceDrafted,
+  announceNoToken,
+  announcePosted,
+  announceRejected,
+  notify,
+  type NotifyEvent,
+  render,
+  type Source,
+} from "./notify";
 import { bump, dayKey, readStats } from "./stats";
 import { botIdentity, CHAT_ID_KEY, discoverChats, sendTelegram, telegramConfig } from "./telegram";
 import {
@@ -158,6 +174,48 @@ LinkedIn does not issue refresh tokens to self-serve apps, so you will get a rem
   }
 }
 
+/**
+ * Lint, publish, announce. Shared by POST /post and by publishing a stored
+ * draft, so a post made from a draft is indistinguishable from any other one
+ * once it leaves here: same guard, same counters, same message in the group.
+ */
+async function publishAndAnswer(
+  env: Env,
+  ctx: ExecutionContext,
+  text: string,
+  visibility: Visibility,
+  force: boolean,
+  source: Source,
+): Promise<Response> {
+  const findings = lint(text);
+  const errors = errorsOf(findings);
+
+  if (errors.length > 0 && !force) {
+    ctx.waitUntil(announceBlocked(env, findings, text, source));
+    return json({ error: "lint failed", findings, hint: "pass force: true to publish anyway" }, 422);
+  }
+
+  const token = await readToken(env.TOKENS);
+  if (!token || isExpired(token)) {
+    ctx.waitUntil(announceNoToken(env, Boolean(token), source));
+    return json({ error: token ? "token expired" : "no token stored", hint: "visit /auth/start?key=…" }, 503);
+  }
+
+  try {
+    const result = await createTextPost(token, env.LINKEDIN_VERSION, text, visibility);
+    console.log(JSON.stringify({ event: "posted", urn: result.urn, length: text.length }));
+    ctx.waitUntil(announcePosted(env, result, text, visibility, source, findings));
+    return json({ ...result, visibility, warnings: findings.filter((f) => f.severity === "warning") }, 201);
+  } catch (err) {
+    if (err instanceof LinkedInError) {
+      console.error(JSON.stringify({ event: "post_failed", status: err.status, body: err.body.slice(0, 500) }));
+      ctx.waitUntil(announceRejected(env, err, source));
+      return json({ error: "linkedin rejected the post", status: err.status, body: err.body.slice(0, 1000) }, 502);
+    }
+    throw err;
+  }
+}
+
 async function handlePost(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   let payload: { text?: unknown; visibility?: unknown; force?: unknown; dry_run?: unknown };
   try {
@@ -168,36 +226,78 @@ async function handlePost(request: Request, env: Env, ctx: ExecutionContext): Pr
 
   const text = typeof payload.text === "string" ? payload.text : "";
   const visibility: Visibility = payload.visibility === "CONNECTIONS" ? "CONNECTIONS" : "PUBLIC";
-  const findings = lint(text);
-  const errors = errorsOf(findings);
 
   if (payload.dry_run === true) {
-    return json({ dryRun: true, length: text.length, findings });
-  }
-  if (errors.length > 0 && payload.force !== true) {
-    ctx.waitUntil(announceBlocked(env, findings, text, "http"));
-    return json({ error: "lint failed", findings, hint: "pass force: true to publish anyway" }, 422);
+    return json({ dryRun: true, length: text.length, findings: lint(text) });
   }
 
-  const token = await readToken(env.TOKENS);
-  if (!token || isExpired(token)) {
-    ctx.waitUntil(announceNoToken(env, Boolean(token), "http"));
-    return json({ error: token ? "token expired" : "no token stored", hint: "visit /auth/start?key=…" }, 503);
-  }
+  return await publishAndAnswer(env, ctx, text, visibility, payload.force === true, "http");
+}
 
+/**
+ * Parks a draft written by the nightly pipeline and announces it.
+ *
+ * Deliberately never publishes, whatever the text says. The pipeline runs
+ * unattended at one in the morning; the whole point of the draft is that a
+ * person reads it first.
+ */
+async function handleDraftCreate(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  let payload: Record<string, unknown>;
   try {
-    const result = await createTextPost(token, env.LINKEDIN_VERSION, text, visibility);
-    console.log(JSON.stringify({ event: "posted", urn: result.urn, length: text.length }));
-    ctx.waitUntil(announcePosted(env, result, text, visibility, "http", findings));
-    return json({ ...result, visibility, warnings: findings.filter((f) => f.severity === "warning") }, 201);
-  } catch (err) {
-    if (err instanceof LinkedInError) {
-      console.error(JSON.stringify({ event: "post_failed", status: err.status, body: err.body.slice(0, 500) }));
-      ctx.waitUntil(announceRejected(env, err, "http"));
-      return json({ error: "linkedin rejected the post", status: err.status, body: err.body.slice(0, 1000) }, 502);
-    }
-    throw err;
+    payload = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return json({ error: "invalid JSON body" }, 400);
   }
+
+  const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const id = str(payload.id);
+  const text = typeof payload.text === "string" ? payload.text : "";
+
+  if (!isDraftId(id)) {
+    return json({ error: "id must be a YouTube id (6 to 24 characters of A-Z, a-z, 0-9, _ or -)" }, 400);
+  }
+  if (!text.trim()) {
+    return json({ error: "text is empty" }, 400);
+  }
+
+  const draft: EpisodeDraft = {
+    id,
+    text,
+    title: str(payload.title) || id,
+    channel: str(payload.channel) || "domovina.ai",
+    url: str(payload.url) || `https://domovina.ai/v/${id}`,
+    episodeDate: str(payload.episodeDate) || undefined,
+    model: str(payload.model) || undefined,
+    createdAt: Date.now(),
+  };
+
+  await putDraft(env.TOKENS, draft);
+  const findings = lint(text);
+  console.log(JSON.stringify({ event: "draft_stored", id, chars: text.length, errors: errorsOf(findings).length }));
+  ctx.waitUntil(announceDrafted(env, draft, findings));
+
+  return json({ stored: true, id, chars: text.length, findings }, 201);
+}
+
+async function handleDraftPublish(id: string, request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const draft = await getDraft(env.TOKENS, id);
+  if (!draft) return json({ error: "no such draft", id }, 404);
+
+  let payload: { text?: unknown; visibility?: unknown; force?: unknown } = {};
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    // An empty body means "publish it as written", which is the common case.
+  }
+
+  const text = typeof payload.text === "string" && payload.text.trim() ? payload.text : draft.text;
+  const visibility: Visibility = payload.visibility === "CONNECTIONS" ? "CONNECTIONS" : "PUBLIC";
+  const response = await publishAndAnswer(env, ctx, text, visibility, payload.force === true, "http");
+
+  // Only a published draft is cleared. A rejected one stays put, so the next
+  // attempt still has the text and the group still lists it as waiting.
+  if (response.status === 201) await deleteDraft(env.TOKENS, draft.id);
+  return response;
 }
 
 async function handleMcp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -295,6 +395,23 @@ async function handleTelegramPreview(request: Request, env: Env, ctx: ExecutionC
     case "quota":
       event = { kind: "quota", stats: { ...(await readStats(env.TOKENS)), posted: 118, rejected: 4 } };
       break;
+    case "draft":
+    case "draft_link": {
+      // A real draft when one is waiting, a sample when none is, so the wording
+      // can be read on any day of the week.
+      const [waiting] = await listDrafts(env.TOKENS, 1);
+      const draft = (waiting && (await getDraft(env.TOKENS, waiting.id))) || {
+        id: "dQw4w9WgXcQ",
+        title: "Sample episode title",
+        channel: "Sample channel",
+        url: "https://domovina.ai/v/dQw4w9WgXcQ",
+        text: "Prvi redak nosi tvrdnju.\n\nDrugi odlomak kaže o čemu je epizoda i zašto je netko treba poslušati.\n\nCijeli transkript i članak: https://domovina.ai/v/dQw4w9WgXcQ",
+        createdAt: Date.now(),
+        model: "sample",
+      };
+      event = kind === "draft_link" ? { kind: "draft_link", draft } : { kind: "draft", draft, findings: lint(draft.text) };
+      break;
+    }
     case "daily": {
       const token = await readToken(env.TOKENS);
       const remaining = token ? Math.max(0, daysLeft(token)) : 0;
@@ -315,11 +432,12 @@ async function handleTelegramPreview(request: Request, env: Env, ctx: ExecutionC
         // A preview never mints a nonce: that would silently kill the link in
         // the reminder already sitting in the group.
         renewLink: null,
+        drafts: await listDrafts(env.TOKENS, 5),
       };
       break;
     }
     default:
-      return json({ error: `unknown kind: ${kind}`, kinds: ["daily", "posted", "lint_blocked", "linkedin_rejected", "no_token", "reconnected", "quota"] }, 400);
+      return json({ error: `unknown kind: ${kind}`, kinds: ["daily", "posted", "lint_blocked", "linkedin_rejected", "no_token", "reconnected", "quota", "draft", "draft_link"] }, 400);
   }
 
   const text = render(event);
@@ -401,6 +519,33 @@ export default {
         return await handlePost(request, env, ctx);
       }
 
+      if (pathname === "/drafts" || pathname.startsWith("/drafts/")) {
+        const denied = await requireBearer(request, env, ctx);
+        if (denied) return denied;
+
+        if (request.method === "POST" && pathname === "/drafts") {
+          return await handleDraftCreate(request, env, ctx);
+        }
+        if (request.method === "GET" && pathname === "/drafts") {
+          return json({ drafts: await listDrafts(env.TOKENS) });
+        }
+
+        const rest = pathname.slice("/drafts/".length);
+        const [id = "", action] = rest.split("/");
+        if (request.method === "POST" && action === "publish") {
+          return await handleDraftPublish(id, request, env, ctx);
+        }
+        if (request.method === "GET" && !action) {
+          const draft = await getDraft(env.TOKENS, id);
+          return draft ? json(draft) : json({ error: "no such draft", id }, 404);
+        }
+        if (request.method === "DELETE" && !action) {
+          await deleteDraft(env.TOKENS, id);
+          return json({ discarded: id });
+        }
+        return json({ error: "not found" }, 404);
+      }
+
       if (request.method === "POST" && pathname === "/mcp") {
         const denied = await requireBearer(request, env, ctx);
         if (denied) return denied;
@@ -439,9 +584,11 @@ export default {
         const token = await readToken(env.TOKENS);
         const stats = await readStats(env.TOKENS, today);
 
+        const drafts = await listDrafts(env.TOKENS, 5);
+
         if (!token) {
           console.warn(JSON.stringify({ event: "cron", note: "no token stored" }));
-          await notify(env, { kind: "daily", day: today, stats, token: null, renewLink: null });
+          await notify(env, { kind: "daily", day: today, stats, token: null, renewLink: null, drafts });
           return;
         }
 
@@ -464,6 +611,7 @@ export default {
           stats,
           token: { name: token.name, expiresAt: token.expiresAt, daysLeft: remaining, expired, renewalDue },
           renewLink,
+          drafts,
         });
       })(),
     );

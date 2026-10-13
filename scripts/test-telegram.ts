@@ -42,7 +42,7 @@ interface Received {
   chat_id: string;
   text: string;
   parse_mode?: string;
-  link_preview_options?: { is_disabled?: boolean };
+  link_preview_options?: { is_disabled?: boolean; url?: string; prefer_large_media?: boolean };
 }
 
 /**
@@ -107,6 +107,29 @@ async function testHappyPath(): Promise<void> {
   check("sends HTML", stub.received[0]?.parse_mode === "HTML");
   check("disables the link preview", stub.received[0]?.link_preview_options?.is_disabled === true);
   check("leaves the chat id alone", kv.store.get(CHAT_ID_KEY) === undefined);
+  stub.stop();
+}
+
+/**
+ * The draft message is the one exception to previews being off, so the option
+ * that turns them on is worth a test of its own: a regression here would show
+ * up as a missing Open Graph card, which nobody reports as a bug.
+ */
+async function testLinkPreview(): Promise<void> {
+  console.log("\na send that asks for a preview");
+  const stub = stubTelegram([{ status: 200, body: OK_BODY }]);
+  const apiBase = await stub.start();
+
+  const sent = await sendTelegram({ TOKENS: fakeKv() } as unknown as Env, config, "draft", {
+    apiBase,
+    previewUrl: "https://domovina.ai/v/S5bScs9QuOk",
+  });
+
+  const options = stub.received[0]?.link_preview_options;
+  check("reports success", sent);
+  check("names the url to preview", options?.url === "https://domovina.ai/v/S5bScs9QuOk");
+  check("asks for the large card", options?.prefer_large_media === true);
+  check("does not also disable it", options?.is_disabled === undefined);
   stub.stop();
 }
 
@@ -205,6 +228,7 @@ function testEscaping(): void {
 }
 
 await testHappyPath();
+  await testLinkPreview();
 await testSupergroupMigration();
 await testMigrationIsPaidOnce();
 await testTransientRetry();

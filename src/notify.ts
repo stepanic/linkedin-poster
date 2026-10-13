@@ -12,6 +12,7 @@
 //   2. The daily summary goes out every single run, quiet day included, so its
 //      absence is itself the alarm. Nothing here monitors the monitor.
 
+import type { DraftSummary, EpisodeDraft } from "./drafts";
 import type { LinkedInError } from "./linkedin";
 import { errorsOf, type Finding } from "./lint";
 import { bump, DAILY_POST_QUOTA, type DayStats, isQuiet, markQuotaWarned, QUOTA_WARN_AT, quotaUsed } from "./stats";
@@ -32,7 +33,16 @@ export type NotifyEvent =
   | { kind: "no_token"; expired: boolean; source: Source }
   | { kind: "reconnected"; name: string; expiresAt: number; days: number }
   | { kind: "quota"; stats: DayStats }
-  | { kind: "daily"; day: string; stats: DayStats; token: DailyToken | null; renewLink: string | null };
+  | { kind: "draft"; draft: EpisodeDraft; findings: Finding[] }
+  | { kind: "draft_link"; draft: EpisodeDraft }
+  | {
+      kind: "daily";
+      day: string;
+      stats: DayStats;
+      token: DailyToken | null;
+      renewLink: string | null;
+      drafts: DraftSummary[];
+    };
 
 export interface DailyToken {
   name?: string;
@@ -134,6 +144,50 @@ function renderQuota(event: Extract<NotifyEvent, { kind: "quota" }>): string {
 }
 
 /**
+ * A draft the nightly pipeline wrote for a new episode.
+ *
+ * The body goes out in a <pre> block rather than quoted or trimmed: this is the
+ * one message whose whole purpose is to be read in full and copied, and
+ * Telegram gives a pre block a copy button on the phone. The lint verdict rides
+ * along because a draft that would be refused at publish time should say so
+ * here, not eight hours later when somebody tries to send it.
+ */
+function renderDraft(event: Extract<NotifyEvent, { kind: "draft" }>): string {
+  const { draft, findings } = event;
+  const errors = errorsOf(findings);
+  const warnings = findings.filter((finding) => finding.severity === "warning");
+
+  const verdict = errors.length
+    ? `🛑 linter: ${errors.map((finding) => finding.rule).join(", ")}. Fix before publishing.`
+    : warnings.length
+      ? `⚠️ linter: ${warnings.map((finding) => finding.rule).join(", ")}`
+      : `✅ linter clean`;
+
+  return (
+    `📝 <b>Draft ready</b> · ${esc(draft.channel)}\n` +
+    `<i>${esc(draft.title)}</i>\n\n` +
+    `<pre>${esc(draft.text)}</pre>\n` +
+    `🔗 ${esc(draft.url)}\n` +
+    `🆔 <code>${esc(draft.id)}</code> · ${draft.text.length} characters · ${verdict}\n\n` +
+    `Publish it from Claude Code: <code>linkedin_publish_draft</code> with this id. ` +
+    `Untouched, it expires in 14 days.`
+  );
+}
+
+/**
+ * The card, on its own.
+ *
+ * Deliberately a second message rather than a preview hung under the draft. The
+ * draft message exists to be copied, and on a phone a tap on its pre block is
+ * the copy gesture; a large Open Graph card in the same bubble pushes the text
+ * up and muddles what is being copied. Two messages keep each one doing one
+ * job: the words here, the picture there.
+ */
+function renderDraftLink(event: Extract<NotifyEvent, { kind: "draft_link" }>): string {
+  return `🖼 <b>How the link resolves</b>\n${esc(event.draft.url)}`;
+}
+
+/**
  * The heartbeat.
  *
  * On days a renewal reminder is due it leads with the alarm and carries the
@@ -141,7 +195,7 @@ function renderQuota(event: Extract<NotifyEvent, { kind: "quota" }>): string {
  * urgent thing is always the first line.
  */
 function renderDaily(event: Extract<NotifyEvent, { kind: "daily" }>): string {
-  const { stats, token, renewLink, day } = event;
+  const { stats, token, renewLink, day, drafts } = event;
 
   let head = `🧾 <b>Daily summary</b> · ${esc(day)}`;
   if (token?.renewalDue || token?.expired) {
@@ -164,7 +218,7 @@ function renderDaily(event: Extract<NotifyEvent, { kind: "daily" }>): string {
     : `🔑 Token: <b>none stored</b>. Nothing can be published.`;
 
   const counters =
-    `📮 posted ${stats.posted} · blocked ${stats.blocked} · rejected ${stats.rejected}` +
+    `📮 posted ${stats.posted} · drafted ${stats.drafted} · blocked ${stats.blocked} · rejected ${stats.rejected}` +
     (stats.noToken ? ` · no token ${stats.noToken}` : "") +
     (stats.unauthorized ? ` · turned away ${stats.unauthorized}` : "");
 
@@ -180,7 +234,16 @@ function renderDaily(event: Extract<NotifyEvent, { kind: "daily" }>): string {
     body = `Nothing reached the feed today.`;
   }
 
-  return `${head}\n${tokenLine}\n${counters}\n\n${body}`;
+  // Drafts do not expire quietly. A pile of them in the morning message is the
+  // reminder that the pipeline wrote posts nobody has looked at yet.
+  const waiting = drafts.length
+    ? `\n\n📝 <b>Drafts waiting (${drafts.length}):</b>\n` +
+      drafts
+        .map((draft) => `• <code>${esc(draft.id)}</code> ${esc(excerpt(draft.title, 70))}`)
+        .join("\n")
+    : "";
+
+  return `${head}\n${tokenLine}\n${counters}\n\n${body}${waiting}`;
 }
 
 export function render(event: NotifyEvent): string {
@@ -197,6 +260,10 @@ export function render(event: NotifyEvent): string {
       return renderReconnected(event);
     case "quota":
       return renderQuota(event);
+    case "draft":
+      return renderDraft(event);
+    case "draft_link":
+      return renderDraftLink(event);
     case "daily":
       return renderDaily(event);
   }
@@ -218,10 +285,14 @@ function stripHtml(html: string): string {
  */
 export async function notify(env: Env, event: NotifyEvent): Promise<void> {
   const html = render(event);
+  // One message asks for a link preview: the follow-up that exists to show how
+  // the episode page's Open Graph tags resolve. Everything else, the renewal
+  // link above all, must never be prefetched by Telegram.
+  const previewUrl = event.kind === "draft_link" ? event.draft.url : undefined;
   try {
     const config = await telegramConfig(env);
     if (config) {
-      const sent = await sendTelegram(env, config, html);
+      const sent = await sendTelegram(env, config, html, { previewUrl });
       if (sent) {
         console.log(JSON.stringify({ event: "notified", kind: event.kind, via: "telegram" }));
         return;
@@ -269,6 +340,18 @@ export async function announcePosted(
     warnings: findings.filter((finding) => finding.severity === "warning"),
   });
   await warnOnQuota(env, stats);
+}
+
+/**
+ * Announces a draft the pipeline parked for review. Counted separately from
+ * posts, because nothing was published and no LinkedIn quota was spent.
+ */
+export async function announceDrafted(env: Env, draft: EpisodeDraft, findings: Finding[]): Promise<void> {
+  await bump(env.TOKENS, "drafted");
+  await notify(env, { kind: "draft", draft, findings });
+  // Sent second, and after the draft rather than with it, so the card lands
+  // under the text it belongs to and never on top of it.
+  await notify(env, { kind: "draft_link", draft });
 }
 
 export async function announceBlocked(env: Env, findings: Finding[], text: string, source: Source): Promise<void> {

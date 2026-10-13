@@ -7,6 +7,7 @@
 // The server is stateless. Every POST carries a complete request, so there is
 // no session to lose and Claude Code can reconnect at any point.
 
+import { deleteDraft, getDraft, listDrafts } from "./drafts";
 import { createTextPost, LinkedInError, type Visibility } from "./linkedin";
 import { errorsOf, formatFindings, lint } from "./lint";
 import { announceBlocked, announceNoToken, announcePosted, announceRejected } from "./notify";
@@ -52,6 +53,47 @@ const TOOLS = [
       type: "object",
       properties: { text: { type: "string" } },
       required: ["text"],
+    },
+  },
+  {
+    name: "linkedin_drafts",
+    description:
+      "List the episode drafts waiting for review. The nightly domovina.ai pipeline writes one per new episode and parks it here instead of publishing it. Returns each draft's id, channel and title.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "linkedin_draft",
+    description:
+      "Read one parked draft in full: the post body as written, the episode it came from, and its link. Use this before publishing so the text can be edited first.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "The draft id, which is the episode's YouTube id." } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "linkedin_publish_draft",
+    description:
+      "Publish a parked draft to the member's own feed. Pass text to publish an edited version instead of the stored one; the stored draft is dropped either way once LinkedIn accepts the post. Same linter as linkedin_post.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "The draft id, which is the episode's YouTube id." },
+        text: { type: "string", description: "Replacement body. Omit to publish the draft exactly as stored." },
+        visibility: { type: "string", enum: ["PUBLIC", "CONNECTIONS"], description: "Defaults to PUBLIC." },
+        force: { type: "boolean", description: "Publish even when the linter reports errors." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "linkedin_discard_draft",
+    description:
+      "Drop a parked draft without publishing it. Drafts also expire on their own after 14 days, so this is only for clearing the list early.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
     },
   },
   {
@@ -109,6 +151,62 @@ async function callTool(
           : "No action needed.",
       ].join("\n"),
     );
+  }
+
+  if (name === "linkedin_drafts") {
+    const drafts = await listDrafts(env.TOKENS);
+    if (drafts.length === 0) {
+      return textResult("No drafts waiting. The nightly pipeline parks one here for every new episode on domovina.ai.");
+    }
+    const lines = drafts.map(
+      (draft) =>
+        `${draft.id}  ${draft.channel} · ${draft.title} (${draft.chars} chars, ${new Date(draft.createdAt).toISOString().slice(0, 10)})`,
+    );
+    return textResult(`${drafts.length} draft(s) waiting:\n\n${lines.join("\n")}`);
+  }
+
+  if (name === "linkedin_draft") {
+    const draft = await getDraft(env.TOKENS, typeof args.id === "string" ? args.id : "");
+    if (!draft) return textResult(`No draft with id ${String(args.id)}. Run linkedin_drafts to see what is waiting.`, true);
+    const findings = lint(draft.text);
+    return textResult(
+      [
+        `${draft.channel} · ${draft.title}`,
+        `Episode: ${draft.url}`,
+        `Drafted: ${new Date(draft.createdAt).toISOString()}${draft.model ? ` by ${draft.model}` : ""}`,
+        `${draft.text.length} characters, ${errorsOf(findings).length} lint error(s)`,
+        "",
+        draft.text,
+      ].join("\n"),
+    );
+  }
+
+  if (name === "linkedin_discard_draft") {
+    const id = typeof args.id === "string" ? args.id : "";
+    const draft = await getDraft(env.TOKENS, id);
+    if (!draft) return textResult(`No draft with id ${id}.`, true);
+    await deleteDraft(env.TOKENS, id);
+    return textResult(`Discarded the draft for ${draft.title}.`);
+  }
+
+  // Publishing a draft is the normal publish path with the stored text loaded
+  // first, so it cannot drift away from linkedin_post: same lint, same token
+  // check, same announcement. The draft is dropped only once LinkedIn accepts
+  // the post, which keeps a rejection recoverable.
+  if (name === "linkedin_publish_draft") {
+    const id = typeof args.id === "string" ? args.id : "";
+    const draft = await getDraft(env.TOKENS, id);
+    if (!draft) return textResult(`No draft with id ${id}. Run linkedin_drafts to see what is waiting.`, true);
+
+    const replacement = typeof args.text === "string" && args.text.trim() ? args.text : draft.text;
+    const result = await callTool(
+      "linkedin_post",
+      { text: replacement, visibility: args.visibility, force: args.force },
+      env,
+      ctx,
+    );
+    if (!result.isError) await deleteDraft(env.TOKENS, id);
+    return result;
   }
 
   if (name === "linkedin_post") {
