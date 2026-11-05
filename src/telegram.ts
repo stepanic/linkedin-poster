@@ -267,3 +267,57 @@ export async function sendTelegramDocument(
   }
   return false;
 }
+
+/**
+ * Sends 2–10 images as one album; the caption (HTML) goes on the first image.
+ * Telegram Desktop does not preview PDFs, and an A4 page is unreadable on a
+ * phone, so a report travels as portrait images first and the PDF second.
+ */
+export async function sendTelegramAlbum(
+  env: Env,
+  config: TelegramConfig,
+  photos: { blob: Blob; name: string }[],
+  caption = "",
+  options: { tries?: number; baseMs?: number; silent?: boolean; apiBase?: string } = {},
+): Promise<boolean> {
+  const { tries = 4, baseMs = 1000, silent = false, apiBase = API } = options;
+  let chatId = config.chatId;
+  const text = caption.length > 1000 ? `${caption.slice(0, 1000)}…` : caption;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    let status = 0;
+    let payload: TelegramResponse = {};
+    try {
+      const form = new FormData();
+      form.set("chat_id", chatId);
+      form.set("disable_notification", String(silent));
+      const media = photos.map((p, i) => ({
+        type: "photo",
+        media: `attach://p${i}`,
+        ...(i === 0 && text ? { caption: text, parse_mode: "HTML" } : {}),
+      }));
+      form.set("media", JSON.stringify(media));
+      photos.forEach((p, i) => form.set(`p${i}`, p.blob, p.name));
+      const response = await fetch(`${apiBase}/bot${config.botToken}/sendMediaGroup`, { method: "POST", body: form });
+      status = response.status;
+      payload = (await response.json().catch(() => ({}))) as TelegramResponse;
+      if (response.ok && payload.ok) return true;
+    } catch (error) {
+      console.warn(JSON.stringify({ event: "telegram_network_error", attempt, message: String(error) }));
+    }
+    const migrated = payload.parameters?.migrate_to_chat_id;
+    if (migrated && String(migrated) !== String(chatId)) {
+      await adoptMigratedChatId(env, migrated);
+      chatId = String(migrated);
+      continue;
+    }
+    const transient = status === 0 || status === 429 || status >= 500;
+    if (!transient || attempt === tries) {
+      console.error(JSON.stringify({ event: "telegram_album_failed", status, description: payload.description ?? null, attempt }));
+      return false;
+    }
+    const retryAfter = Number(payload.parameters?.retry_after) * 1000;
+    const wait = (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : baseMs * attempt) + Math.floor(Math.random() * 300);
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+  return false;
+}

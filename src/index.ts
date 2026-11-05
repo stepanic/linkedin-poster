@@ -13,6 +13,7 @@
 //   DELETE /drafts/{id}    discard a draft (bearer)
 //   POST /drafts/{id}/chapters  send one chapter of the episode to the group (bearer)
 //   POST /telegram/document  send a file (multipart: document, caption) to the group (bearer)
+//   POST /telegram/photos  send 2–10 images as an album (multipart: photo×N, caption) (bearer)
 //   POST /mcp              MCP server, streamable HTTP (bearer)
 //   GET  /telegram/chatid  discover the group's chat id (guarded by SETUP_KEY)
 //   GET  /telegram/test    send a test message (guarded by SETUP_KEY)
@@ -36,7 +37,7 @@ import {
   type Source,
 } from "./notify";
 import { bump, dayKey, readStats } from "./stats";
-import { botIdentity, CHAT_ID_KEY, discoverChats, sendTelegram, sendTelegramDocument, telegramConfig } from "./telegram";
+import { botIdentity, CHAT_ID_KEY, discoverChats, sendTelegram, sendTelegramAlbum, sendTelegramDocument, telegramConfig } from "./telegram";
 import {
   bearerFrom,
   clearRenewalNonce,
@@ -529,6 +530,29 @@ async function handleTelegramDocument(request: Request, env: Env): Promise<Respo
   return json({ sent, bytes: file.size, name }, sent ? 200 : 502);
 }
 
+/** Forwards 2–10 images as one album (portrait report pages for the phone). */
+async function handleTelegramPhotos(request: Request, env: Env): Promise<Response> {
+  const config = await telegramConfig(env);
+  if (!config) return json({ error: "telegram not configured", need: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"] }, 503);
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return json({ error: "expected multipart/form-data with `photo` files" }, 400);
+  }
+  const photos = form.getAll("photo").filter((f): f is File => typeof f !== "string");
+  if (photos.length < 2 || photos.length > 10) return json({ error: "need 2–10 `photo` files", got: photos.length }, 400);
+  if (photos.some((p) => p.size > 10 * 1024 * 1024)) return json({ error: "photo too large (max 10 MB each)" }, 413);
+  const sent = await sendTelegramAlbum(
+    env,
+    config,
+    photos.map((p, i) => ({ blob: p, name: p.name || `p${i}.png` })),
+    String(form.get("caption") ?? ""),
+    { silent: form.get("silent") === "1" },
+  );
+  return json({ sent, count: photos.length }, sent ? 200 : 502);
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -610,6 +634,11 @@ export default {
         const denied = await requireBearer(request, env, ctx);
         if (denied) return denied;
         return await handleTelegramDocument(request, env);
+      }
+      if (request.method === "POST" && pathname === "/telegram/photos") {
+        const denied = await requireBearer(request, env, ctx);
+        if (denied) return denied;
+        return await handleTelegramPhotos(request, env);
       }
       if (request.method === "POST" && pathname === "/mcp") {
         const denied = await requireBearer(request, env, ctx);
