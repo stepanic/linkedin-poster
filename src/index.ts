@@ -12,6 +12,7 @@
 //   POST /drafts/{id}/publish  publish a stored draft (bearer)
 //   DELETE /drafts/{id}    discard a draft (bearer)
 //   POST /drafts/{id}/chapters  send one chapter of the episode to the group (bearer)
+//   POST /telegram/document  send a file (multipart: document, caption) to the group (bearer)
 //   POST /mcp              MCP server, streamable HTTP (bearer)
 //   GET  /telegram/chatid  discover the group's chat id (guarded by SETUP_KEY)
 //   GET  /telegram/test    send a test message (guarded by SETUP_KEY)
@@ -35,7 +36,7 @@ import {
   type Source,
 } from "./notify";
 import { bump, dayKey, readStats } from "./stats";
-import { botIdentity, CHAT_ID_KEY, discoverChats, sendTelegram, telegramConfig } from "./telegram";
+import { botIdentity, CHAT_ID_KEY, discoverChats, sendTelegram, sendTelegramDocument, telegramConfig } from "./telegram";
 import {
   bearerFrom,
   clearRenewalNonce,
@@ -505,6 +506,29 @@ async function handleTelegramTest(request: Request, env: Env, ctx: ExecutionCont
   return json({ sent, chatId: (await env.TOKENS.get(CHAT_ID_KEY)) ?? env.TELEGRAM_CHAT_ID }, sent ? 200 : 502);
 }
 
+/**
+ * Forwards one file to the group. Used by fetch.domovina.tv for the daily
+ * nightly report PDF: the bot token lives only here, so callers send the file
+ * through the Worker instead of holding a second copy of the secret.
+ */
+async function handleTelegramDocument(request: Request, env: Env): Promise<Response> {
+  const config = await telegramConfig(env);
+  if (!config) return json({ error: "telegram not configured", need: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"] }, 503);
+  let form: FormData;
+  try {
+    form = await request.formData();
+  } catch {
+    return json({ error: "expected multipart/form-data with a `document` file" }, 400);
+  }
+  const file = form.get("document");
+  if (!file || typeof file === "string") return json({ error: "missing `document` file" }, 400);
+  if (file.size > 45 * 1024 * 1024) return json({ error: "file too large (max 45 MB)" }, 413);
+  const caption = String(form.get("caption") ?? "");
+  const name = (file as File).name || "document.pdf";
+  const sent = await sendTelegramDocument(env, config, file, name, caption, { silent: form.get("silent") === "1" });
+  return json({ sent, bytes: file.size, name }, sent ? 200 : 502);
+}
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
@@ -582,6 +606,11 @@ export default {
         return json({ error: "not found" }, 404);
       }
 
+      if (request.method === "POST" && pathname === "/telegram/document") {
+        const denied = await requireBearer(request, env, ctx);
+        if (denied) return denied;
+        return await handleTelegramDocument(request, env);
+      }
       if (request.method === "POST" && pathname === "/mcp") {
         const denied = await requireBearer(request, env, ctx);
         if (denied) return denied;

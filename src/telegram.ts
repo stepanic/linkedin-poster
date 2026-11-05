@@ -207,3 +207,63 @@ export async function discoverChats(botToken: string, apiBase = API): Promise<Di
   }
   return [...seen.values()];
 }
+
+/**
+ * Sends one file (a PDF report, for instance) with an optional HTML caption.
+ *
+ * Same migration and retry rules as sendTelegram. The file is re-attached on
+ * every attempt because a FormData body is consumed by the first fetch.
+ */
+export async function sendTelegramDocument(
+  env: Env,
+  config: TelegramConfig,
+  file: Blob,
+  filename: string,
+  caption = "",
+  options: { tries?: number; baseMs?: number; silent?: boolean; apiBase?: string } = {},
+): Promise<boolean> {
+  const { tries = 4, baseMs = 1000, silent = false, apiBase = API } = options;
+  let chatId = config.chatId;
+  // Telegram caps captions at 1024 characters.
+  const text = caption.length > 1000 ? `${caption.slice(0, 1000)}…` : caption;
+
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    let status = 0;
+    let payload: TelegramResponse = {};
+    try {
+      const form = new FormData();
+      form.set("chat_id", chatId);
+      form.set("document", file, filename);
+      if (text) {
+        form.set("caption", text);
+        form.set("parse_mode", "HTML");
+      }
+      form.set("disable_notification", String(silent));
+      const response = await fetch(`${apiBase}/bot${config.botToken}/sendDocument`, { method: "POST", body: form });
+      status = response.status;
+      payload = (await response.json().catch(() => ({}))) as TelegramResponse;
+      if (response.ok && payload.ok) return true;
+    } catch (error) {
+      console.warn(JSON.stringify({ event: "telegram_network_error", attempt, message: String(error) }));
+    }
+
+    const migrated = payload.parameters?.migrate_to_chat_id;
+    if (migrated && String(migrated) !== String(chatId)) {
+      await adoptMigratedChatId(env, migrated);
+      chatId = String(migrated);
+      continue;
+    }
+
+    const transient = status === 0 || status === 429 || status >= 500;
+    if (!transient || attempt === tries) {
+      console.error(
+        JSON.stringify({ event: "telegram_document_failed", status, description: payload.description ?? null, attempt }),
+      );
+      return false;
+    }
+    const retryAfter = Number(payload.parameters?.retry_after) * 1000;
+    const wait = (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : baseMs * attempt) + Math.floor(Math.random() * 300);
+    await new Promise((resolve) => setTimeout(resolve, wait));
+  }
+  return false;
+}
