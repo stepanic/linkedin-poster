@@ -400,9 +400,14 @@ export async function announceDrafted(env: Env, draft: EpisodeDraft, findings: F
  * draft above them already did. No webhook fallback either, since a chapter
  * card is only worth anything as a Telegram preview.
  */
-export async function sendChapter(env: Env, chapter: EpisodeChapter): Promise<boolean> {
-  const config = await telegramConfig(env);
-  if (!config) return false;
+/**
+ * One chapter message. With `chatId` it goes to that podcast's own Telegram
+ * channel instead of the default group.
+ */
+export async function sendChapter(env: Env, chapter: EpisodeChapter, chatId?: string): Promise<boolean> {
+  const base = await telegramConfig(env);
+  if (!base) return false;
+  const config = chatId ? { ...base, chatId, adoptMigration: false } : base;
   return await sendTelegram(env, config, render({ kind: "chapter", chapter }), {
     previewUrl: chapterUrl(chapter),
     silent: true,

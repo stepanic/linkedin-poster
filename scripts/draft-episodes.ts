@@ -39,6 +39,15 @@
 //   --no-chapters    drafts only, no chapter messages after them
 //   --chapters-only  with --id: send that episode's chapters, write no draft
 //   --chapter-delay S  seconds between chapter messages (default 3.5)
+//   --provision      create a missing Telegram channel for an opted-in podcast
+//                    (scripts/provision, MTProto). Without it such a podcast's
+//                    chapters still go to the default group.
+//
+// Podcasts with their own Telegram channel. A podcast opts in through the
+// registry in fetch.domovina.tv (`telegram.opt_in` on its entry), keyed by
+// YouTube channel_id because Tier 2 episodes all live in `_unlisted/`. Its
+// chapters then go to its own channel (li.domovina.ai keeps the mapping in KV);
+// the draft itself still goes to the default group, where it is reviewed.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -51,6 +60,8 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FETCH_REPO = process.env.FETCH_REPO || join(homedir(), "git", "domovinatv", "fetch.domovina.tv");
 const OUTPUT_DIR = join(FETCH_REPO, "storage", "output");
 const META_INDEX = join(FETCH_REPO, "storage", "meta", "channels", "data", "index.json");
+const REGISTRY = join(FETCH_REPO, "data", "podcasts_registry.json");
+const PROVISION_DIR = join(dirname(fileURLToPath(import.meta.url)), "provision");
 
 const POSTER_BASE = (process.env.POSTER_BASE || "https://li.domovina.ai").replace(/\/$/, "");
 const SITE_BASE = (process.env.SITE_BASE || "https://domovina.ai").replace(/\/$/, "");
@@ -81,6 +92,7 @@ const DRY_RUN = flag("--dry-run");
 const CDN_CHECK = !flag("--no-cdn-check");
 const CHAPTERS = !flag("--no-chapters");
 const CHAPTERS_ONLY = flag("--chapters-only");
+const PROVISION = flag("--provision");
 // A Telegram group takes about twenty messages a minute from one bot. Three
 // and a half seconds stays under that with room for the draft itself.
 const CHAPTER_DELAY_MS = Number(option("--chapter-delay") ?? process.env.CHAPTER_DELAY_SEC ?? 3.5) * 1000;
@@ -91,6 +103,8 @@ interface Episode {
   dir: string;
   channelSlug: string;
   channelName: string;
+  /** YouTube UC… id from yt-dlp's info.json; the key for a podcast's own Telegram channel. */
+  youtubeChannelId: string | null;
   title: string;
   date: string | null;
   durationSeconds: number | null;
@@ -154,16 +168,47 @@ function channelNames(): Map<string, string> {
  * the slug would otherwise reach the group as the literal string "_unlisted".
  * yt-dlp already wrote the real name next door.
  */
-function channelFromInfo(dir: string, base: string): string | null {
+function infoOf(dir: string, base: string): { name: string | null; channelId: string | null } {
   try {
     const info = JSON.parse(readFileSync(join(dir, `${base}.info.json`), "utf-8")) as {
       channel?: string;
       uploader?: string;
+      channel_id?: string;
     };
-    return info.channel || info.uploader || null;
+    const channelId = info.channel_id && /^UC[A-Za-z0-9_-]{22}$/.test(info.channel_id) ? info.channel_id : null;
+    return { name: info.channel || info.uploader || null, channelId };
   } catch {
-    return null;
+    return { name: null, channelId: null };
   }
+}
+
+interface RegistryEntry {
+  slug: string;
+  name: string;
+  optIn: boolean;
+}
+
+/** Registry entries by YouTube channel_id. Read once per run. */
+function registryByChannelId(): Map<string, RegistryEntry> {
+  const map = new Map<string, RegistryEntry>();
+  try {
+    const registry = JSON.parse(readFileSync(REGISTRY, "utf-8")) as {
+      podcasts?: Array<{
+        slug?: string;
+        display_name?: string;
+        youtube?: { channel_id?: string };
+        telegram?: { opt_in?: string | boolean };
+      }>;
+    };
+    for (const podcast of registry.podcasts ?? []) {
+      const id = podcast.youtube?.channel_id;
+      if (!id || !podcast.slug) continue;
+      map.set(id, { slug: podcast.slug, name: podcast.display_name || podcast.slug, optIn: Boolean(podcast.telegram?.opt_in) });
+    }
+  } catch {
+    // Without the registry nobody has opted in, which is the safe reading.
+  }
+  return map;
 }
 
 interface SummaryFile {
@@ -195,6 +240,7 @@ function readEpisode(dir: string, file: string, names: Map<string, string>): Epi
   if (!hasArticle) return null;
 
   const slug = summary.source?.channel || dir.split("/").pop() || "domovina.ai";
+  const info = infoOf(dir, base);
   const speakers = (summary.summary?.speakers ?? [])
     .map((speaker) => [speaker.suggested_name, speaker.role].filter(Boolean).join(", "))
     .filter(Boolean);
@@ -204,7 +250,8 @@ function readEpisode(dir: string, file: string, names: Map<string, string>): Epi
     base,
     dir,
     channelSlug: slug,
-    channelName: names.get(slug) || channelFromInfo(dir, base) || slug,
+    channelName: names.get(slug) || info.name || slug,
+    youtubeChannelId: info.channelId,
     title: summary.summary?.title_hr || summary.source?.title || base,
     date: summary.source?.upload_date ?? null,
     durationSeconds: summary.source?.duration_seconds ?? null,
@@ -241,6 +288,8 @@ function findEpisodes(): Episode[] {
 
     for (const file of files) {
       if (!file.endsWith(".wav.canary.summary.json")) continue;
+      // With --id the window is ignored, so skip the JSON parse of every other episode.
+      if (ONLY_ID && !file.includes(`_yt_${ONLY_ID}`)) continue;
       const path = join(dir, file);
       // Gate 1, before the JSON parse: a stat is cheap and most files are old.
       if (!ONLY_ID && statSync(path).mtimeMs < cutoff) continue;
@@ -512,7 +561,7 @@ const sleep = (ms: number): Promise<void> => new Promise((done) => setTimeout(do
  * it lands. Stops at the first failure rather than leaving holes in the
  * sequence: the next run resumes from there.
  */
-async function shareChapters(id: string, token: string, state: State): Promise<void> {
+async function shareChapters(id: string, token: string, state: State, youtubeChannelId?: string): Promise<void> {
   let chapters: Chapter[];
   try {
     chapters = await fetchChapters(id);
@@ -537,7 +586,7 @@ async function shareChapters(id: string, token: string, state: State): Promise<v
     const response = await fetch(`${POSTER_BASE}/drafts/${id}/chapters`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify(chapter),
+      body: JSON.stringify(youtubeChannelId ? { ...chapter, youtubeChannelId } : chapter),
     }).catch((error: unknown) => ({ ok: false, status: 0, text: async () => String(error) }));
 
     if (!response.ok) {
@@ -550,7 +599,69 @@ async function shareChapters(id: string, token: string, state: State): Promise<v
     writeState(state);
     sent += 1;
   }
-  console.log(`   ✅ ${sent}/${todo.length} poglavlja u Telegram grupi`);
+  console.log(`   ✅ ${sent}/${todo.length} poglavlja u ${youtubeChannelId ? "Telegram kanalu podcasta" : "Telegram grupi"}`);
+}
+
+// ─── podcast channel ──────────────────────────────────────────────────────
+
+/**
+ * Where an episode's chapters go.
+ *
+ *   undefined  the default group (no consent, or no channel yet and no --provision)
+ *   "UC…"      the podcast's own channel, which exists in the Worker's mapping
+ *   null       skip chapters this run: provisioning failed, retry next time
+ *
+ * A failed provisioning does not fall back to the group: the podcast agreed to
+ * its own channel, and forty chapters in the wrong place are worse than a day's delay.
+ */
+async function podcastTarget(
+  episode: Episode,
+  registry: Map<string, RegistryEntry>,
+  token: string,
+): Promise<string | undefined | null> {
+  const channelId = episode.youtubeChannelId;
+  const entry = channelId ? registry.get(channelId) : undefined;
+  if (!channelId || !entry?.optIn) return undefined;
+
+  if (DRY_RUN) {
+    console.log(`   📣 ${entry.name} ima pristanak za vlastiti Telegram kanal (dry run: ne provjeravam mapiranje)`);
+    return channelId;
+  }
+
+  const response = await fetch(`${POSTER_BASE}/telegram/podcasts/${channelId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => null);
+  if (response?.ok) return channelId;
+  if (!response || response.status !== 404) {
+    console.error(`   ❌ mapiranje Telegram kanala nedostupno (${response?.status ?? "mreža"}) - poglavlja idući put`);
+    return null;
+  }
+
+  if (!PROVISION) {
+    console.log(`   📣 ${entry.name} ima pristanak, a kanal još ne postoji (--provision ga stvara) - poglavlja idu u grupu`);
+    return undefined;
+  }
+
+  console.log(`   🛠️  stvaram Telegram kanal za ${entry.name} (${channelId})`);
+  const result = spawnSync(
+    "npx",
+    [
+      "tsx",
+      "src/create-channel.ts",
+      channelId,
+      "--title",
+      `${entry.name} · domovina.ai`,
+      "--avatar",
+      `${CDN_BASE}/registry/avatars/${entry.slug}.jpg`,
+      "--json",
+    ],
+    { cwd: PROVISION_DIR, encoding: "utf-8", stdio: ["ignore", "pipe", "inherit"], timeout: 180_000 },
+  );
+  if (result.status !== 0) {
+    console.error(`   ❌ provisioner nije uspio (exit ${result.status ?? result.signal}) - poglavlja idući put`);
+    return null;
+  }
+  return channelId;
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────
@@ -564,7 +675,11 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     console.log(`▶️  poglavlja za ${ONLY_ID}`);
-    await shareChapters(ONLY_ID, DRY_RUN ? "" : apiToken(), state);
+    const token = DRY_RUN ? "" : apiToken();
+    const [episode] = findEpisodes();
+    const target = episode ? await podcastTarget(episode, registryByChannelId(), token) : undefined;
+    if (target === null) return;
+    await shareChapters(ONLY_ID, token, state, target);
     return;
   }
 
@@ -588,6 +703,7 @@ async function main(): Promise<void> {
   }
 
   const token = DRY_RUN ? "" : apiToken();
+  const registry = registryByChannelId();
   let written = 0;
 
   for (const episode of pending) {
@@ -639,7 +755,8 @@ async function main(): Promise<void> {
       // The Worker announces the draft after it answers. A short pause lets the
       // draft and its card land first, so the chapters sit underneath them.
       await sleep(5000);
-      await shareChapters(episode.id, token, state);
+      const target = await podcastTarget(episode, registry, token);
+      if (target !== null) await shareChapters(episode.id, token, state, target);
     }
   }
 

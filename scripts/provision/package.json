@@ -1,0 +1,21 @@
+{
+  "name": "domovina-telegram-provision",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MTProto provisioner: Telegram kanal + grupa za raspravu po podcastu (teleproto, Node)",
+  "type": "module",
+  "scripts": {
+    "login": "tsx src/login.ts",
+    "create-channel": "tsx src/create-channel.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "16.5.0",
+    "teleproto": "1.233.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.0",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3"
+  }
+}
