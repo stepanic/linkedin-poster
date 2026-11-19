@@ -11,8 +11,7 @@
 //   GET  /drafts/{id}      one draft, in full (bearer)
 //   POST /drafts/{id}/publish  publish a stored draft (bearer)
 //   DELETE /drafts/{id}    discard a draft (bearer)
-//   POST /drafts/{id}/chapters  send one chapter to the group, or with youtubeChannelId to that podcast's channel (bearer)
-//   GET|PUT /telegram/podcasts/{UC…}  the podcast's own Telegram channel, written by scripts/provision (bearer)
+//   POST /drafts/{id}/chapters  send one chapter of the episode to the group (bearer)
 //   POST /telegram/document  send a file (multipart: document, caption) to the group (bearer)
 //   POST /telegram/photos  send 2–10 images as an album (multipart: photo×N, caption) (bearer)
 //   POST /mcp              MCP server, streamable HTTP (bearer)
@@ -38,7 +37,6 @@ import {
   type Source,
 } from "./notify";
 import { bump, dayKey, readStats } from "./stats";
-import { getPodcastChat, isYoutubeChannelId, putPodcastChat } from "./podcasts";
 import { botIdentity, CHAT_ID_KEY, discoverChats, sendTelegram, sendTelegramAlbum, sendTelegramDocument, telegramConfig } from "./telegram";
 import {
   bearerFrom,
@@ -298,7 +296,7 @@ async function handleDraftCreate(request: Request, env: Env, ctx: ExecutionConte
 async function handleChapter(id: string, request: Request, env: Env): Promise<Response> {
   if (!isDraftId(id)) return json({ error: "id must be a YouTube id" }, 400);
 
-  let payload: { sec?: unknown; title?: unknown; youtubeChannelId?: unknown };
+  let payload: { sec?: unknown; title?: unknown };
   try {
     payload = (await request.json()) as typeof payload;
   } catch {
@@ -309,20 +307,8 @@ async function handleChapter(id: string, request: Request, env: Env): Promise<Re
   if (!Number.isInteger(sec) || sec < 0) return json({ error: "sec must be a whole number of seconds" }, 400);
   const title = typeof payload.title === "string" ? payload.title.trim().slice(0, 300) : "";
 
-  // A podcast with its own channel gets its chapters there. A named channel
-  // without a mapping is an error, not a fallback: forty chapters landing in
-  // the default group by accident is exactly the noise the mapping prevents.
-  let chatId: string | undefined;
-  if (payload.youtubeChannelId !== undefined) {
-    if (!isYoutubeChannelId(payload.youtubeChannelId)) return json({ error: "youtubeChannelId must be UC…" }, 400);
-    const podcast = await getPodcastChat(env.TOKENS, payload.youtubeChannelId);
-    if (!podcast) return json({ error: "no telegram channel for this podcast", youtubeChannelId: payload.youtubeChannelId }, 404);
-    chatId = podcast.chatId;
-  }
-
-  const sent = await sendChapter(env, { id, sec, title }, chatId);
-  const target = chatId ? "podcast" : "group";
-  return sent ? json({ sent: true, id, sec, target }, 201) : json({ sent: false, id, sec, target }, 502);
+  const sent = await sendChapter(env, { id, sec, title });
+  return sent ? json({ sent: true, id, sec }, 201) : json({ sent: false, id, sec }, 502);
 }
 
 async function handleDraftPublish(id: string, request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -642,30 +628,6 @@ export default {
           return json({ discarded: id });
         }
         return json({ error: "not found" }, 404);
-      }
-
-      if (pathname.startsWith("/telegram/podcasts/")) {
-        const denied = await requireBearer(request, env, ctx);
-        if (denied) return denied;
-        const youtubeChannelId = pathname.slice("/telegram/podcasts/".length);
-        if (!isYoutubeChannelId(youtubeChannelId)) return json({ error: "expected a YouTube channel id (UC…)" }, 400);
-        if (request.method === "GET") {
-          const chat = await getPodcastChat(env.TOKENS, youtubeChannelId);
-          return chat ? json(chat) : json({ error: "no telegram channel for this podcast", youtubeChannelId }, 404);
-        }
-        if (request.method === "PUT") {
-          let body: Record<string, unknown>;
-          try {
-            body = (await request.json()) as Record<string, unknown>;
-          } catch {
-            return json({ error: "invalid JSON body" }, 400);
-          }
-          const stored = await putPodcastChat(env.TOKENS, youtubeChannelId, body);
-          if (typeof stored === "string") return json({ error: stored }, 400);
-          console.log(JSON.stringify({ event: "podcast_chat_stored", youtubeChannelId, chatId: stored.chatId }));
-          return json(stored, 201);
-        }
-        return json({ error: "method not allowed" }, 405);
       }
 
       if (request.method === "POST" && pathname === "/telegram/document") {

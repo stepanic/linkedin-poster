@@ -19,12 +19,6 @@ const MAX_MESSAGE = 3900;
 export interface TelegramConfig {
   botToken: string;
   chatId: string;
-  /**
-   * Whether a supergroup migration is persisted as the new default chat id.
-   * False for a podcast's own channel: its id lives in tg:podcast:<UC…>, and
-   * adopting it would silently redirect every notification to that channel.
-   */
-  adoptMigration?: boolean;
 }
 
 /** Escapes the three characters Telegram's HTML parse mode treats as markup. */
@@ -129,7 +123,7 @@ export async function sendTelegram(
 
     const migrated = payload.parameters?.migrate_to_chat_id;
     if (migrated && String(migrated) !== String(chatId)) {
-      if (config.adoptMigration !== false) await adoptMigratedChatId(env, migrated);
+      await adoptMigratedChatId(env, migrated);
       chatId = String(migrated);
       continue; // Retry in the same run, against the new id.
     }
@@ -255,7 +249,7 @@ export async function sendTelegramDocument(
 
     const migrated = payload.parameters?.migrate_to_chat_id;
     if (migrated && String(migrated) !== String(chatId)) {
-      if (config.adoptMigration !== false) await adoptMigratedChatId(env, migrated);
+      await adoptMigratedChatId(env, migrated);
       chatId = String(migrated);
       continue;
     }
@@ -312,7 +306,7 @@ export async function sendTelegramAlbum(
     }
     const migrated = payload.parameters?.migrate_to_chat_id;
     if (migrated && String(migrated) !== String(chatId)) {
-      if (config.adoptMigration !== false) await adoptMigratedChatId(env, migrated);
+      await adoptMigratedChatId(env, migrated);
       chatId = String(migrated);
       continue;
     }
